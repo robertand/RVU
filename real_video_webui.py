@@ -62,6 +62,8 @@ class Config:
     TEMPLATE_FOLDER = os.path.join(BASE_DIR, "templates")
     RVE_BACKEND_PATH = os.path.join(BASE_DIR, "backend")
     RVE_PYTHON_PATH = os.path.join(BASE_DIR, "python", "python", "bin", "python3")
+    if not os.path.exists(RVE_PYTHON_PATH):
+        RVE_PYTHON_PATH = sys.executable
     # Added MXF format and increased max upload size for 100GB files
     ALLOWED_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'mxf', 'mts', 'm2ts', 'ts', 'mpg', 'mpeg'}
     HOST = "0.0.0.0"
@@ -151,7 +153,7 @@ socketio = SocketIO(
 
 # Create necessary directories
 for folder in [config.UPLOAD_FOLDER, config.OUTPUT_FOLDER, config.TEMP_FOLDER, 
-               config.TEMPLATE_FOLDER, config.CUSTOM_MODELS_PATH, config.TEMP_DOWNLOAD_PATH]:
+               config.TEMPLATE_FOLDER, config.MODELS_FOLDER, config.CUSTOM_MODELS_PATH, config.TEMP_DOWNLOAD_PATH]:
     Path(folder).mkdir(exist_ok=True)
 
 print(f"Base directory: {config.BASE_DIR}")
@@ -4814,7 +4816,7 @@ def create_html_template():
                 const clipPath = this.originalVideoContainer.style.clipPath;
                 if (!clipPath) return 50;
                 
-                const match = clipPath.match(/inset\(0\s+(\d+)%\s+0\s+0\)/);
+                const match = clipPath.match(/inset\\(0\\s+(\\d+)%\\s+0\\s+0\\)/);
                 return match ? parseFloat(match[1]) : 50;
             }
             
@@ -5206,7 +5208,7 @@ class ModelManager:
             return 'denoise'
         elif 'deh264' in filename_lower or 'decompress' in filename_lower or (('span' in filename_lower or 'bhi' in filename_lower) and 'deh264' in filename_lower):
             return 'decompress'
-        elif any(k in filename_lower for k in ['nomos', 'realesr', 'upscale', 'anime', '2x', '4x', 'span', 'bhi', 'light', 'vsr', 'rtx', 'conservative']):
+        elif any(k in filename_lower for k in ['nomos', 'realesr', 'upscale', 'anime', '2x', '4x', 'span', 'bhi', 'light', 'vsr', 'rtx', 'nvidia', 'conservative']):
             return 'upscale'
         
         return 'upscale'
@@ -5215,14 +5217,17 @@ class ModelManager:
         """Detect scale factor from model filename"""
         name_lower = model_name.lower()
         
-        if any(k in name_lower for k in ['x4', '4x', 'x4plus', 'nomos8k', 'realesr-general-x4v3', 'vsr']):
+        # Try regex for x2, 2x, etc.
+        scale_match = re.search(r'(\d+)x|x(\d+)', name_lower)
+        if scale_match:
+            scale = int(scale_match.group(1) or scale_match.group(2))
+            if 1 <= scale <= 8:
+                return scale
+
+        if any(k in name_lower for k in ['nomos8k', 'realesr-general-x4v3', 'vsr']):
             return 4
-        elif any(k in name_lower for k in ['x3', '3x']):
-            return 3
-        elif any(k in name_lower for k in ['x2', '2x', 'up2x', 'realesr-animevideov3-x2']):
+        elif 'realesr-animevideov3-x2' in name_lower:
             return 2
-        elif any(k in name_lower for k in ['x1', '1x']):
-            return 1
         
         return 2
 
@@ -5997,7 +6002,7 @@ class RVEBackendIntegration:
                 text=True,
                 cwd=config.RVE_BACKEND_PATH,
                 env=env,
-                timeout=3
+                timeout=10
             )
             
             if result.returncode == 0:
@@ -6011,7 +6016,7 @@ class RVEBackendIntegration:
                         text=True,
                         cwd=config.RVE_BACKEND_PATH,
                         env=env,
-                        timeout=5
+                        timeout=10
                     )
                     
                     if result2.returncode == 0:
