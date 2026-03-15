@@ -854,7 +854,7 @@ class Deinterlacer:
 # VERIFICARE BACKEND ȘI GPU-URI
 # ============================================================================
 
-RVE_BACKEND_FILE = os.path.join(config.RVE_BACKEND_PATH, "rve-backend.py")
+RVE_BACKEND_FILE = os.path.join(config.RVE_BACKEND_PATH, "simple_backend.py")
 RVE_BACKEND_AVAILABLE = os.path.exists(RVE_BACKEND_FILE)
 
 # Detect available GPUs
