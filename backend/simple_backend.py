@@ -7,6 +7,13 @@ import numpy as np
 import subprocess
 from pathlib import Path
 
+# Try to import spandrel for model loading
+try:
+    from spandrel import ImageModelDescriptor, ModelLoader
+    SPANDREL_AVAILABLE = True
+except ImportError:
+    SPANDREL_AVAILABLE = False
+
 def get_video_info(input_path):
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
@@ -20,11 +27,30 @@ def get_video_info(input_path):
     cap.release()
     return info
 
+def process_frame(model, frame, device):
+    if model is None:
+        return frame
+
+    # Convert BGR to RGB and to tensor
+    img = frame.astype(np.float32) / 255.0
+    img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
+    img = img.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        output = model(img)
+
+    # Convert back to numpy BGR
+    output = output.squeeze(0).cpu().numpy()
+    output = np.clip(np.transpose(output, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)
+    output = output[:, :, [2, 1, 0]]
+    return output
+
 def main():
     parser = argparse.ArgumentParser(description="Simple Stable RVE Backend")
     parser.add_argument("-i", "--input", help="Input video path")
     parser.add_argument("-o", "--output", help="Output video path")
     parser.add_argument("--upscale_model", help="Path to upscale model")
+    parser.add_argument("--extra_restoration_models", action='append', help="Paths to extra restoration models (denoise, etc.)")
     parser.add_argument("--override_upscale_scale", type=int, help="Scale factor")
     parser.add_argument("--backend", default="pytorch", help="Processing backend")
     parser.add_argument("--pytorch_gpu_id", type=int, default=0, help="GPU ID")
@@ -36,11 +62,14 @@ def main():
     args, unknown = parser.parse_known_args()
 
     if args.version:
-        print("Simple-Backend-1.0.0")
+        print("Simple-Backend-1.1.0")
         return
 
+    device = torch.device(f"cuda:{args.pytorch_gpu_id}" if torch.cuda.is_available() else "cpu")
+
     if args.list_backends:
-        print("Available Backends: ['pytorch']")
+        print(f"Available Backends: ['pytorch']")
+        print(f"Device: {device}")
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 print(f"PyTorch GPU {i}: {torch.cuda.get_device_name(i)}")
@@ -55,18 +84,43 @@ def main():
         print("Error: Could not open video")
         sys.exit(1)
 
-    print(f"Processing: {args.input}")
-    print(f"Resolution: {info['width']}x{info['height']}, FPS: {info['fps']}, Frames: {info['total_frames']}")
+    # Load models
+    upscale_model = None
+    restoration_models = []
 
-    if args.upscale_model:
-        print(f"Using Model: {args.upscale_model}")
+    if SPANDREL_AVAILABLE:
+        if args.upscale_model and os.path.exists(args.upscale_model):
+            print(f"Loading upscale model: {args.upscale_model}")
+            try:
+                upscale_model = ModelLoader().load_from_file(args.upscale_model).to(device).eval()
+            except Exception as e:
+                print(f"Error loading upscale model: {e}")
+
+        if args.extra_restoration_models:
+            for m_path in args.extra_restoration_models:
+                if os.path.exists(m_path):
+                    print(f"Loading restoration model: {m_path}")
+                    try:
+                        restoration_models.append(ModelLoader().load_from_file(m_path).to(device).eval())
+                    except Exception as e:
+                        print(f"Error loading restoration model {m_path}: {e}")
     else:
-        print("No specific model selected, using high-quality cubic interpolation fallback.")
+        print("Warning: spandrel not available. AI models will not be used. Falling back to resizing.")
 
-    # Setup FFmpeg for writing
-    # Use a pipe for frames to FFmpeg
-    output_w = info['width'] * (args.override_upscale_scale or 2)
-    output_h = info['height'] * (args.override_upscale_scale or 2)
+    # Determine output resolution
+    # Try to get scale from model if possible
+    scale = args.override_upscale_scale or 2
+    if upscale_model and hasattr(upscale_model, 'scale'):
+        scale = upscale_model.scale
+
+    output_w = info['width'] * scale
+    output_h = info['height'] * scale
+
+    print(f"Processing: {args.input}")
+    print(f"Resolution: {info['width']}x{info['height']} -> {output_w}x{output_h}, FPS: {info['fps']}, Frames: {info['total_frames']}")
+
+    # First, create a temporary video file for the processed frames
+    temp_video = args.output + ".temp.mp4"
 
     ffmpeg_cmd = [
         'ffmpeg', '-y',
@@ -75,18 +129,10 @@ def main():
         '-pix_fmt', 'bgr24', '-r', str(info['fps']),
         '-i', '-',
         '-c:v', 'libx264', '-crf', args.crf, '-pix_fmt', 'yuv420p',
-        args.output
+        temp_video
     ]
 
-    # Try to copy audio if possible
-    try:
-        audio_cmd = ['ffmpeg', '-y', '-i', args.input, '-i', args.output, '-map', '0:a?', '-map', '1:v', '-c:v', 'copy', '-c:a', 'copy', args.output + '.tmp.mp4']
-        # We will do this at the end
-    except:
-        pass
-
     process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-
     cap = cv2.VideoCapture(args.input)
     frame_idx = 0
 
@@ -96,9 +142,15 @@ def main():
             if not ret:
                 break
 
-            # Placeholder for actual AI processing
-            # For now, just a high-quality resize as a stable fallback
-            processed_frame = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_CUBIC)
+            # Apply restoration models (denoise, etc.) first
+            for r_model in restoration_models:
+                frame = process_frame(r_model, frame, device)
+
+            # Apply upscale model
+            if upscale_model:
+                processed_frame = process_frame(upscale_model, frame, device)
+            else:
+                processed_frame = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_CUBIC)
 
             process.stdin.write(processed_frame.tobytes())
 
@@ -111,6 +163,24 @@ def main():
         cap.release()
         process.stdin.close()
         process.wait()
+
+    # Merge audio from original video
+    print("Merging audio...")
+    merge_cmd = [
+        'ffmpeg', '-y',
+        '-i', temp_video,
+        '-i', args.input,
+        '-map', '0:v:0',
+        '-map', '1:a:0?',
+        '-c:v', 'copy',
+        '-c:a', 'copy',
+        args.output
+    ]
+    subprocess.run(merge_cmd)
+
+    # Clean up temp file
+    if os.path.exists(temp_video):
+        os.remove(temp_video)
 
     print("Processing completed successfully.")
 
