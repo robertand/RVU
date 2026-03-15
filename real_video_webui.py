@@ -5245,12 +5245,28 @@ DOWNLOADABLE_MODELS = [
         'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
     },
     {
+        'id': 'realesrgan-x4plus-anime',
+        'name': 'RealESRGAN x4plus Anime',
+        'description': 'Optimized for anime and drawings',
+        'size': '17MB',
+        'category': 'upscale',
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
+    },
+    {
         'id': 'realesr-animevideov3',
         'name': 'RealESR AnimeVideo v3',
-        'description': 'Anime video upscaler',
-        'size': '67MB',
+        'description': 'Anime video upscaler (fast)',
+        'size': '5MB',
         'category': 'upscale',
         'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth'
+    },
+    {
+        'id': 'realesr-general-x4v3',
+        'name': 'RealESR General x4v3',
+        'description': 'Latest general purpose model',
+        'size': '4MB',
+        'category': 'upscale',
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth'
     },
     {
         'id': 'rife-v4.6',
@@ -5261,12 +5277,28 @@ DOWNLOADABLE_MODELS = [
         'url': 'https://github.com/hzwer/Practical-RIFE/releases/download/v1.0/rife-v4.6.pth'
     },
     {
+        'id': 'rife-v4.15',
+        'name': 'RIFE v4.15',
+        'description': 'Latest RIFE model (higher quality)',
+        'size': '22MB',
+        'category': 'interpolate',
+        'url': 'https://github.com/hzwer/Practical-RIFE/releases/download/v1.0/rife-v4.15.pth'
+    },
+    {
         'id': 'drunet',
         'name': 'DRUNet',
         'description': 'Denoising model',
         'size': '55MB',
         'category': 'denoise',
         'url': 'https://github.com/cszn/KAIR/releases/download/v1.0/drunet.pth'
+    },
+    {
+        'id': 'scunet',
+        'name': 'SCUNet',
+        'description': 'Blind image denoising',
+        'size': '28MB',
+        'category': 'denoise',
+        'url': 'https://github.com/cszn/KAIR/releases/download/v1.0/scunet.pth'
     },
     {
         'id': 'deh264',

@@ -58,6 +58,11 @@ def main():
     print(f"Processing: {args.input}")
     print(f"Resolution: {info['width']}x{info['height']}, FPS: {info['fps']}, Frames: {info['total_frames']}")
 
+    if args.upscale_model:
+        print(f"Using Model: {args.upscale_model}")
+    else:
+        print("No specific model selected, using high-quality cubic interpolation fallback.")
+
     # Setup FFmpeg for writing
     # Use a pipe for frames to FFmpeg
     output_w = info['width'] * (args.override_upscale_scale or 2)
