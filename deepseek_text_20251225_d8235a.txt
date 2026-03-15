@@ -1,0 +1,9 @@
+models/
+├── upscale/
+│   ├── RealESRGAN_x4plus.pth
+│   └── 2x_AnimeJaNai_V2_Compact_36k.pth
+├── interpolate/
+│   ├── rife4.6.pkl
+│   └── rife4.7.pkl
+├── denoise/
+└── decompress/
