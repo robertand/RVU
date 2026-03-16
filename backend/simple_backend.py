@@ -65,7 +65,11 @@ def main():
         print("Simple-Backend-1.1.0")
         return
 
-    device = torch.device(f"cuda:{args.pytorch_gpu_id}" if torch.cuda.is_available() else "cpu")
+    # Set GPU environment variable if specified
+    if args.pytorch_gpu_id is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.pytorch_gpu_id)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.list_backends:
         print(f"Available Backends: ['pytorch']")

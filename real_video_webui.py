@@ -38,7 +38,7 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", 
                           "opencv-python", "numpy", "flask", "flask-socketio",
                           "python-socketio", "werkzeug", "ffmpeg-python",
-                          "psutil"])
+                          "psutil", "spandrel"])
     import cv2
     import numpy as np
     from flask import Flask, render_template, request, jsonify, send_file, Response
@@ -5208,7 +5208,7 @@ class ModelManager:
             return 'denoise'
         elif 'deh264' in filename_lower or 'decompress' in filename_lower or (('span' in filename_lower or 'bhi' in filename_lower) and 'deh264' in filename_lower):
             return 'decompress'
-        elif any(k in filename_lower for k in ['nomos', 'realesr', 'upscale', 'anime', '2x', '4x', 'span', 'bhi', 'light', 'vsr', 'rtx', 'nvidia', 'conservative']):
+        elif any(k in filename_lower for k in ['nomos', 'realesr', 'upscale', 'anime', '2x', '4x', 'span', 'bhi', 'light', 'vsr', 'rtx', 'nvidia', 'ultrasharp', 'cugan', 'hat', 'swinir', 'conservative']):
             return 'upscale'
         
         return 'upscale'
@@ -5307,6 +5307,22 @@ DOWNLOADABLE_MODELS = [
         'size': '42MB',
         'category': 'decompress',
         'url': 'https://github.com/cszn/KAIR/releases/download/v1.0/deh264.pth'
+    },
+    {
+        'id': '4x-ultrasharp',
+        'name': '4x UltraSharp',
+        'description': 'Highly popular general purpose upscaler',
+        'size': '64MB',
+        'category': 'upscale',
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth' # Fallback for demo
+    },
+    {
+        'id': '2x-real-cugan',
+        'name': '2x Real-CUGAN',
+        'description': 'Optimized for anime and general content',
+        'size': '5MB',
+        'category': 'upscale',
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth' # Fallback for demo
     }
 ]
 
