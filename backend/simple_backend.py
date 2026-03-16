@@ -50,6 +50,8 @@ def main():
     parser.add_argument("-i", "--input", help="Input video path")
     parser.add_argument("-o", "--output", help="Output video path")
     parser.add_argument("--upscale_model", help="Path to upscale model")
+    parser.add_argument("--interpolate_model", help="Path to interpolation model (currently placeholder)")
+    parser.add_argument("--interpolate_factor", type=float, help="Interpolation multiplier")
     parser.add_argument("--extra_restoration_models", action='append', help="Paths to extra restoration models (denoise, etc.)")
     parser.add_argument("--override_upscale_scale", type=int, help="Scale factor")
     parser.add_argument("--backend", default="pytorch", help="Processing backend")
@@ -122,6 +124,13 @@ def main():
 
     print(f"Processing: {args.input}")
     print(f"Resolution: {info['width']}x{info['height']} -> {output_w}x{output_h}, FPS: {info['fps']}, Frames: {info['total_frames']}")
+
+    if args.upscale_model:
+        print(f"Using Upscale Model: {args.upscale_model}")
+
+    if args.interpolate_model:
+        print(f"Interpolation requested with: {args.interpolate_model} (Factor: {args.interpolate_factor or 2.0}x)")
+        print("Note: Frame interpolation is currently handled as a pass-through in this simplified backend.")
 
     # First, create a temporary video file for the processed frames
     temp_video = args.output + ".temp.mp4"

@@ -5984,7 +5984,16 @@ class ModelDownloader:
             dest_dir = os.path.join(config.MODELS_FOLDER, model['category'])
             os.makedirs(dest_dir, exist_ok=True)
             
-            dest_path = os.path.join(dest_dir, os.path.basename(model['url']))
+            # Extract filename from URL, removing query parameters
+            url_path = model['url'].split('?')[0]
+            filename = os.path.basename(url_path)
+
+            # Ensure filename has correct extension if not present in URL
+            if '.' not in filename:
+                filename = f"{model['id']}.pth"
+
+            dest_path = os.path.join(dest_dir, filename)
+            print(f"Moving downloaded model {model['id']} to: {dest_path}")
             shutil.move(temp_path, dest_path)
             
             socketio.emit('download_complete', {
