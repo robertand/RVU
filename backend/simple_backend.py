@@ -37,7 +37,11 @@ def process_frame(model, frame, device):
     img = img.unsqueeze(0).to(device)
 
     with torch.no_grad():
-        output = model(img)
+        # spandrel model descriptor can be called directly or via .model
+        if hasattr(model, 'model'):
+            output = model.model(img)
+        else:
+            output = model(img)
 
     # Convert back to numpy BGR
     output = output.squeeze(0).cpu().numpy()

@@ -5314,7 +5314,7 @@ DOWNLOADABLE_MODELS = [
         'description': 'Highly popular general purpose upscaler',
         'size': '64MB',
         'category': 'upscale',
-        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth' # Fallback for demo
+        'url': 'https://huggingface.co/lokCX/4x-Ultrasharp/resolve/main/4x-UltraSharp.pth?download=true'
     },
     {
         'id': '2x-real-cugan',
@@ -5322,7 +5322,7 @@ DOWNLOADABLE_MODELS = [
         'description': 'Optimized for anime and general content',
         'size': '5MB',
         'category': 'upscale',
-        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth' # Fallback for demo
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth'
     }
 ]
 
@@ -5992,9 +5992,14 @@ class ModelDownloader:
             if '.' not in filename:
                 filename = f"{model['id']}.pth"
 
-            dest_path = os.path.join(dest_dir, filename)
-            print(f"Moving downloaded model {model['id']} to: {dest_path}")
-            shutil.move(temp_path, dest_path)
+            dest_path = os.path.abspath(os.path.join(dest_dir, filename))
+            print(f"Moving downloaded model {model['id']} from {temp_path} to: {dest_path}")
+
+            if os.path.exists(temp_path):
+                shutil.move(temp_path, dest_path)
+                print(f"Successfully saved model to: {dest_path}")
+            else:
+                raise Exception(f"Temporary file {temp_path} not found after download")
             
             socketio.emit('download_complete', {
                 'model_id': model['id'],
@@ -6003,7 +6008,9 @@ class ModelDownloader:
             })
             
         except Exception as e:
-            print(f"Error downloading model {model['id']}: {e}")
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Error downloading model {model['id']}:\n{error_details}")
             socketio.emit('download_error', {
                 'model_id': model['id'],
                 'error': str(e)
