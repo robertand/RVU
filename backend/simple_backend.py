@@ -71,11 +71,12 @@ def main():
         print("Simple-Backend-1.1.0")
         return
 
-    # Set GPU environment variable if specified
-    if args.pytorch_gpu_id is not None:
+    # Set GPU environment variable if specified and not already set
+    if args.pytorch_gpu_id is not None and "CUDA_VISIBLE_DEVICES" not in os.environ:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.pytorch_gpu_id)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     if args.list_backends:
         print(f"Available Backends: ['pytorch']")
@@ -166,6 +167,9 @@ def main():
             # Apply upscale model
             if upscale_model:
                 processed_frame = process_frame(upscale_model, frame, device)
+                # If model output resolution doesn't match expected output resolution, resize it
+                if processed_frame.shape[1] != output_w or processed_frame.shape[0] != output_h:
+                    processed_frame = cv2.resize(processed_frame, (output_w, output_h), interpolation=cv2.INTER_LANCZOS4)
             else:
                 processed_frame = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_CUBIC)
 

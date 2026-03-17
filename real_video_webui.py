@@ -5445,6 +5445,8 @@ class VideoProcessor:
             use_real_backend=use_real_backend
         )
         
+        print(f"DIAGNOSTIC: Created job with input resolution {VideoInfo.from_file(input_path).width}x{VideoInfo.from_file(input_path).height} on GPU {settings.gpu_id}")
+
         self.active_jobs[job_id] = job
         self.job_queue.put(job)
         
@@ -6205,10 +6207,6 @@ class RVEBackendIntegration:
         settings = job.settings
         
         effective_gpu_id = gpu_id
-        if gpu_id > 0:
-            print(f"INFO: GPU ID {gpu_id} selected, but RVE backend might have GPU indexing issues")
-            print(f"Using GPU 0 for compatibility. Performance will still use CUDA_VISIBLE_DEVICES")
-            effective_gpu_id = 0
         
         if settings.upscale_enabled and settings.upscale_model:
             model_path = self._find_model_file_improved(
