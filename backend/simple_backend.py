@@ -130,12 +130,22 @@ def main():
         print("Warning: spandrel not available. AI models will not be used. Falling back to resizing.")
 
     # Determine output resolution
-    # Order of priority: 1. override_upscale_scale, 2. model_scale, 3. default 2
-    scale = args.override_upscale_scale or model_scale or 2
-    print(f"Final determined scale factor: {scale}x")
-
-    output_w = info['width'] * scale
-    output_h = info['height'] * scale
+    if args.override_upscale_scale:
+        if args.override_upscale_scale > 10:  # Assume it's a target width in pixels
+            output_w = args.override_upscale_scale
+            output_h = int(info['height'] * (output_w / info['width']))
+            scale = output_w / info['width']
+            print(f"Target resolution override: {output_w}x{output_h} (Scale: {scale:.2f}x)")
+        else:  # Assume it's a scale factor
+            scale = args.override_upscale_scale
+            output_w = info['width'] * scale
+            output_h = info['height'] * scale
+            print(f"Scale factor override: {scale}x ({output_w}x{output_h})")
+    else:
+        scale = model_scale or 2
+        output_w = info['width'] * scale
+        output_h = info['height'] * scale
+        print(f"Using {'model native' if model_scale else 'default'} scale: {scale}x ({output_w}x{output_h})")
 
     print(f"Processing: {args.input}")
     print(f"Resolution: {info['width']}x{info['height']} -> {output_w}x{output_h}, FPS: {info['fps']}, Frames: {info['total_frames']}")
@@ -177,10 +187,12 @@ def main():
             # Apply upscale model
             if upscale_model:
                 processed_frame = process_frame(upscale_model, frame, device)
-                # If model output resolution doesn't match expected output resolution, resize it
+                # Only resize if the user requested a specific resolution that differs from the model's native output
                 if processed_frame.shape[1] != output_w or processed_frame.shape[0] != output_h:
+                    print(f"Resizing model output from {processed_frame.shape[1]}x{processed_frame.shape[0]} to {output_w}x{output_h}")
                     processed_frame = cv2.resize(processed_frame, (output_w, output_h), interpolation=cv2.INTER_LANCZOS4)
             else:
+                # No AI model, use traditional upscaling
                 processed_frame = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_CUBIC)
 
             process.stdin.write(processed_frame.tobytes())
