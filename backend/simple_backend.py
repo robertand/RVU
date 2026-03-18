@@ -27,24 +27,72 @@ def get_video_info(input_path):
     cap.release()
     return info
 
-def process_frame(model, frame, device):
+def process_frame(model, frame, device, tilesize=0, overlap=16, precision="auto", tta=False):
     if model is None:
         return frame
 
-    # Convert BGR to RGB and to tensor
+    # Convert BGR to RGB
     img = frame.astype(np.float32) / 255.0
     img = torch.from_numpy(np.transpose(img[:, :, [2, 1, 0]], (2, 0, 1))).float()
     img = img.unsqueeze(0).to(device)
 
+    # Set precision
+    if precision == "float16" or (precision == "auto" and device.type == "cuda"):
+        img = img.half()
+        model = model.half()
+    else:
+        img = img.float()
+        model = model.float()
+
+    # Handle Tiling
+    b, c, h, w = img.shape
+    scale = model.scale if hasattr(model, 'scale') else 1
+
+    if tilesize > 0:
+        # Tiling Implementation
+        stride = tilesize - overlap
+        output_h, output_w = h * scale, w * scale
+        output = torch.zeros((b, c, output_h, output_w), device=device, dtype=img.dtype)
+        weight = torch.zeros((b, c, output_h, output_w), device=device, dtype=img.dtype)
+
+        for y in range(0, h, stride):
+            for x in range(0, w, stride):
+                # Extract tile
+                y1, x1 = y, x
+                y2, x2 = min(y + tilesize, h), min(x + tilesize, w)
+                tile = img[:, :, y1:y2, x1:x2]
+
+                # Process tile
+                with torch.no_grad():
+                    if hasattr(model, 'model'):
+                        tile_out = model.model(tile)
+                    else:
+                        tile_out = model(tile)
+
+                # Place tile back
+                oy1, ox1 = y1 * scale, x1 * scale
+                oy2, ox2 = oy1 + tile_out.shape[2], ox1 + tile_out.shape[3]
+                output[:, :, oy1:oy2, ox1:ox2] += tile_out
+                weight[:, :, oy1:oy2, ox1:ox2] += 1.0
+
+        output /= weight
+        return output
+
     with torch.no_grad():
-        # spandrel model descriptor can be called directly or via .model
-        if hasattr(model, 'model'):
-            output = model.model(img)
+        # Handle TTA if requested
+        if tta:
+            outputs = []
+            for flip in [False, True]:
+                curr_img = torch.flip(img, [3]) if flip else img
+                curr_out = model.model(curr_img) if hasattr(model, 'model') else model(curr_img)
+                if flip: curr_out = torch.flip(curr_out, [3])
+                outputs.append(curr_out)
+            output = torch.stack(outputs).mean(0)
         else:
-            output = model(img)
+            output = model.model(img) if hasattr(model, 'model') else model(img)
 
     # Convert back to numpy BGR
-    output = output.squeeze(0).cpu().numpy()
+    output = output.squeeze(0).float().cpu().numpy()
     output = np.clip(np.transpose(output, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)
     output = output[:, :, [2, 1, 0]]
     return output
@@ -61,6 +109,10 @@ def main():
     parser.add_argument("--backend", default="pytorch", help="Processing backend")
     parser.add_argument("--pytorch_gpu_id", type=int, default=0, help="GPU ID")
     parser.add_argument("--crf", default="18", help="CRF for encoding")
+    parser.add_argument("--tilesize", type=int, default=0, help="Tile size for processing (0 = auto)")
+    parser.add_argument("--overlap", type=int, default=16, help="Overlap between tiles")
+    parser.add_argument("--precision", choices=["float16", "float32", "auto"], default="auto", help="Inference precision")
+    parser.add_argument("--tta", action="store_true", help="Enable Test Time Augmentation")
     parser.add_argument("--version", action="store_true", help="Print version")
     parser.add_argument("--list_backends", action="store_true", help="List backends")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output")
@@ -182,14 +234,13 @@ def main():
 
             # Apply restoration models (denoise, etc.) first
             for r_model in restoration_models:
-                frame = process_frame(r_model, frame, device)
+                frame = process_frame(r_model, frame, device, args.tilesize, args.overlap, args.precision, args.tta)
 
             # Apply upscale model
             if upscale_model:
-                processed_frame = process_frame(upscale_model, frame, device)
+                processed_frame = process_frame(upscale_model, frame, device, args.tilesize, args.overlap, args.precision, args.tta)
                 # Only resize if the user requested a specific resolution that differs from the model's native output
                 if processed_frame.shape[1] != output_w or processed_frame.shape[0] != output_h:
-                    print(f"Resizing model output from {processed_frame.shape[1]}x{processed_frame.shape[0]} to {output_w}x{output_h}")
                     processed_frame = cv2.resize(processed_frame, (output_w, output_h), interpolation=cv2.INTER_LANCZOS4)
             else:
                 # No AI model, use traditional upscaling

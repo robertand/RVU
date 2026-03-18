@@ -85,6 +85,10 @@ class Config:
     # Hardware acceleration
     HW_ACCEL_AVAILABLE = False
     HW_ACCEL_TYPE = None  # 'cuda', 'qsv', 'vaapi', 'videotoolbox'
+    # Default processing settings
+    DEFAULT_TILE_SIZE = 0
+    DEFAULT_OVERLAP = 16
+    DEFAULT_PRECISION = 'auto'
 
 config = Config()
 
@@ -2813,6 +2817,14 @@ def create_html_template():
                             </select>
                         </div>
                         <div style="min-width: 150px;">
+                            <label>Tile Size (0=Auto):</label>
+                            <input type="number" id="tileSize" value="0" min="0" step="32" style="width: 100%; padding: 8px; background: #334155; border: 1px solid #475569; border-radius: 6px; color: #f8fafc;">
+                        </div>
+                        <div style="min-width: 150px;">
+                            <label>Tile Overlap:</label>
+                            <input type="number" id="tileOverlap" value="16" min="0" step="8" style="width: 100%; padding: 8px; background: #334155; border: 1px solid #475569; border-radius: 6px; color: #f8fafc;">
+                        </div>
+                        <div style="min-width: 150px;">
                             <label>Output Format:</label>
                             <select id="outputFormat">
                                 <option value="mp4" selected>MP4</option>
@@ -2836,6 +2848,10 @@ def create_html_template():
                         <div class="checkbox-group">
                             <input type="checkbox" id="ensembleMode">
                             <label for="ensembleMode">Ensemble Mode (Better Quality)</label>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="ttaEnabled">
+                            <label for="ttaEnabled" title="Test Time Augmentation - Improves quality but slower">Enable TTA (Test Time Augmentation)</label>
                         </div>
                     </div>
                 </div>
@@ -4333,7 +4349,10 @@ def create_html_template():
                 precision: document.getElementById('precision').value,
                 output_format: document.getElementById('outputFormat').value,
                 crf: parseInt(document.getElementById('crf').value),
-                tiling_enabled: document.getElementById('tilingEnabled').checked,
+                tile_size: parseInt(document.getElementById('tileSize').value),
+                overlap: parseInt(document.getElementById('tileOverlap').value),
+                tta_enabled: document.getElementById('ttaEnabled').checked,
+                tiling_enabled: document.getElementById('tilingEnabled').checked || parseInt(document.getElementById('tileSize').value) > 0,
                 benchmark_mode: document.getElementById('benchmarkMode').checked,
                 ensemble_mode: document.getElementById('ensembleMode').checked,
                 auto_hdr_mode: document.getElementById('autoHDRMode').checked,
@@ -5044,6 +5063,8 @@ class ProcessingSettings:
     gpu_id: int = 0
     precision: str = "auto"
     tile_size: int = 0
+    overlap: int = 16
+    tta_enabled: bool = False
     output_format: str = "mp4"
     output_codec: str = "libx264"
     crf: int = 18
@@ -6324,6 +6345,16 @@ class RVEBackendIntegration:
         if settings.ensemble_mode:
             args.extend(['--ensemble'])
         
+        if settings.tta_enabled:
+            args.extend(['--tta'])
+
+        if settings.tile_size > 0:
+            args.extend(['--tilesize', str(settings.tile_size)])
+            args.extend(['--overlap', str(settings.overlap)])
+        elif settings.tiling_enabled:
+            args.extend(['--tilesize', '512'])
+            args.extend(['--overlap', '16'])
+
         if settings.auto_hdr_mode:
             args.extend(['--hdr_mode'])
         

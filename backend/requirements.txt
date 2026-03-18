@@ -19,3 +19,4 @@ torchvision==0.22.0
 einops
 safetensors
 torch_tensorrt==2.7.0
+spandrel
