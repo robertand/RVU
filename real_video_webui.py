@@ -32,19 +32,21 @@ try:
     from flask_socketio import SocketIO, emit
     from werkzeug.utils import secure_filename
     import ffmpeg
+    import requests
 except ImportError:
     print("Installing required packages...")
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", 
                           "opencv-python", "numpy", "flask", "flask-socketio",
                           "python-socketio", "werkzeug", "ffmpeg-python",
-                          "psutil", "spandrel"])
+                          "psutil", "spandrel", "requests"])
     import cv2
     import numpy as np
     from flask import Flask, render_template, request, jsonify, send_file, Response
     from flask_socketio import SocketIO, emit
     from werkzeug.utils import secure_filename
     import ffmpeg
+    import requests
 # ============================================================================
 # CONFIGURATION AND CONSTANTS
 # ============================================================================
@@ -858,7 +860,7 @@ class Deinterlacer:
 # VERIFICARE BACKEND ȘI GPU-URI
 # ============================================================================
 
-RVE_BACKEND_FILE = os.path.join(config.RVE_BACKEND_PATH, "simple_backend.py")
+RVE_BACKEND_FILE = os.path.join(config.RVE_BACKEND_PATH, "rve_backend_server.py")
 RVE_BACKEND_AVAILABLE = os.path.exists(RVE_BACKEND_FILE)
 
 # Detect available GPUs
@@ -5150,7 +5152,7 @@ class ModelManager:
         }
     
     def get_available_models(self, category: str = None, backend: str = None) -> dict:
-        """Get available models organized by subfolders and custom models path"""
+        """Get available models organized by subfolders and custom models path, merging with API results if available"""
         all_models = {}
         
         scan_dirs = [Path(config.MODELS_FOLDER), Path(config.CUSTOM_MODELS_PATH)]
@@ -5163,6 +5165,18 @@ class ModelManager:
             for models_dir in scan_dirs:
                 if models_dir.exists():
                     cat_models.update(self._scan_models_for_backend(cat, backend, models_dir))
+
+            # Merge with API models if possible
+            try:
+                response = requests.get("http://localhost:8765/models", timeout=1)
+                if response.status_code == 200:
+                    api_models = response.json()
+                    if cat in api_models:
+                        for model_name, model_info in api_models[cat].items():
+                            if model_name not in cat_models:
+                                cat_models[model_name] = model_info
+            except:
+                pass
                 
             all_models[cat] = cat_models
         
@@ -5464,9 +5478,9 @@ class VideoProcessor:
         
         settings = ProcessingSettings.from_dict(settings_dict)
         
-        if not self.rve_backend.backend_available:
+        if not self.rve_backend.detect_backend().get('available'):
             use_real_backend = False
-            print("Backend not available, forcing demo mode")
+            print("Backend API not available, forcing demo mode")
         
         display_name = f"{original_filename} (GPU {settings.gpu_id}, {settings.backend})"
         if settings.deinterlace_method != 'none':
@@ -5610,35 +5624,65 @@ class VideoProcessor:
             return False, job.input_path
     
     def _process_with_rve_backend(self, job: ProcessingJob, input_path: str):
-        """Process job using real RVE backend with hardware acceleration"""
+        """Process job using RVE backend API"""
         try:
-            print(f"Starting RVE backend for job {job.id} on GPU {job.settings.gpu_id}")
-            print(f"Input path: {input_path}")
-            print(f"Deinterlace method: {job.settings.deinterlace_method}")
-            print(f"Hardware acceleration: {config.HW_ACCEL_AVAILABLE} ({config.HW_ACCEL_TYPE})")
+            print(f"Starting job {job.id} via API on GPU {job.settings.gpu_id}")
             
             # Update job to use deinterlaced input if available
             job.input_path = input_path
+            filename = os.path.basename(input_path)
             
-            # Create arguments and start process
-            args = self.rve_backend.create_backend_arguments(job)
-            print("Final command arguments:")
-            print(" ".join(args))
+            # Request processing via API
+            payload = {
+                'filename': filename,
+                'settings': asdict(job.settings)
+            }
             
-            process = self.rve_backend.start_backend_process(job)
-            job.process = process  # Store process reference for stopping
-            
-            # Monitor progress
-            progress_thread = threading.Thread(
-                target=self._monitor_progress,
-                args=(job, process),
-                daemon=True
+            response = requests.post(
+                f"{self.rve_backend.api_url}/process",
+                json=payload,
+                timeout=10
             )
-            progress_thread.start()
             
-            # Wait for process to complete
-            print(f"Waiting for process {process.pid} to complete...")
-            return_code = process.wait()
+            if response.status_code != 200:
+                raise Exception(f"API Error: {response.text}")
+
+            api_data = response.json()
+            api_job_id = api_data.get('job_id')
+
+            # Monitor progress via API
+            while True:
+                time.sleep(2)
+
+                # Check if job was stopped locally
+                if job.status == 'cancelled':
+                    requests.post(f"{self.rve_backend.api_url}/stop_processing/{api_job_id}")
+                    break
+
+                # Get status from API
+                status_response = requests.get(f"{self.rve_backend.api_url}/jobs")
+                if status_response.status_code == 200:
+                    api_jobs = status_response.json()
+                    remote_job = next((j for j in api_jobs if j['id'] == api_job_id), None)
+
+                    if remote_job:
+                        job.progress = remote_job.get('progress', 0)
+                        job.status = remote_job.get('status', 'processing')
+                        self._emit_job_update(job)
+
+                        if job.status in ['completed', 'failed']:
+                            if job.status == 'completed':
+                                # Map remote output to local path
+                                remote_output = remote_job.get('output')
+                                if remote_output:
+                                    job.output_path = os.path.join(config.OUTPUT_FOLDER, remote_output)
+                            else:
+                                job.error_message = remote_job.get('error', 'Unknown remote error')
+                            break
+                else:
+                    print(f"Warning: Could not get API job status: {status_response.status_code}")
+
+            return_code = 0 if job.status == 'completed' else 1
             
             print(f"Process completed with return code: {return_code}")
             
@@ -6079,80 +6123,49 @@ class ModelDownloader:
 # ============================================================================
 
 class RVEBackendIntegration:
-    """Integrates the REAL RVE backend with WebUI"""
+    """Integrates the REAL RVE backend with WebUI via HTTP API"""
     
     def __init__(self, socketio):
         self.socketio = socketio
-        self.backend_available = RVE_BACKEND_AVAILABLE
+        self.api_url = "http://localhost:8765"
         self.backend_info = {}
+        self._start_backend_server()
+
+    def _start_backend_server(self):
+        """Starts the backend server if not running"""
+        try:
+            requests.get(f"{self.api_url}/status", timeout=1)
+            print("✓ Backend server already running")
+        except:
+            print("🚀 Starting backend server...")
+            server_script = os.path.join(config.RVE_BACKEND_PATH, "rve_backend_server.py")
+            if os.path.exists(server_script):
+                subprocess.Popen([sys.executable, server_script],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+                time.sleep(2)
         
     def detect_backend(self):
-        """Detect available backends and capabilities"""
-        if not self.backend_available:
-            return {
-                'available': False,
-                'error': 'RVE backend not found'
-            }
-        
+        """Detect available backends and capabilities via API"""
         try:
-            env = os.environ.copy()
-            env['PYTHONPATH'] = f"{config.RVE_BACKEND_PATH}:{env.get('PYTHONPATH', '')}"
-            
-            result = subprocess.run(
-                [config.RVE_PYTHON_PATH, RVE_BACKEND_FILE, '--version'],
-                capture_output=True,
-                text=True,
-                cwd=config.RVE_BACKEND_PATH,
-                env=env,
-                timeout=10
-            )
-            
-            if result.returncode == 0:
-                version = result.stdout.strip()
-                
-                gpu_info = []
-                try:
-                    result2 = subprocess.run(
-                        [config.RVE_PYTHON_PATH, RVE_BACKEND_FILE, '--list_backends'],
-                        capture_output=True,
-                        text=True,
-                        cwd=config.RVE_BACKEND_PATH,
-                        env=env,
-                        timeout=10
-                    )
-                    
-                    if result2.returncode == 0:
-                        output = result2.stdout
-                        for line in output.split('\n'):
-                            if 'PyTorch GPU' in line or 'NCNN GPU' in line:
-                                gpu_info.append(line.strip())
-                except:
-                    pass
-                
+            response = requests.get(f"{self.api_url}/status", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
                 return {
                     'available': True,
                     'info': {
-                        'version': version,
-                        'backends': ['pytorch', 'ncnn', 'tensorrt'],
-                        'gpus': gpu_info if gpu_info else AVAILABLE_GPUS,
+                        'version': data.get('version', '2.0.0'),
+                        'backends': ['pytorch'],
+                        'gpus': data.get('gpus', AVAILABLE_GPUS),
                         'half_precision': True,
-                        'hardware_acceleration': config.HW_ACCEL_AVAILABLE,
-                        'hw_accel_type': config.HW_ACCEL_TYPE
+                        'hardware_acceleration': data.get('cuda', False),
+                        'hw_accel_type': 'cuda' if data.get('cuda') else None
                     }
                 }
             else:
-                print(f"Backend version check failed: {result.stderr}")
-                return {
-                    'available': False,
-                    'error': 'Backend test failed'
-                }
-                
+                return {'available': False, 'error': f'API Error: {response.status_code}'}
         except Exception as e:
-            print(f"Backend detection error: {str(e)}")
-            return {
-                'available': False,
-                'error': f'Backend error: {str(e)}'
-            }
+            return {'available': False, 'error': f'Connection error: {str(e)}'}
     
     def create_backend_arguments(self, job: ProcessingJob) -> list:
         """Create command line arguments for RVE backend with GPU support"""

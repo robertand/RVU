@@ -76,6 +76,11 @@ def process_frame(model, frame, device, tilesize=0, overlap=16, precision="auto"
                 weight[:, :, oy1:oy2, ox1:ox2] += 1.0
 
         output /= weight
+
+        # Convert back to numpy BGR
+        output = output.squeeze(0).float().cpu().numpy()
+        output = np.clip(np.transpose(output, (1, 2, 0)) * 255.0, 0, 255).astype(np.uint8)
+        output = output[:, :, [2, 1, 0]]
         return output
 
     with torch.no_grad():
