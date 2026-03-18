@@ -893,7 +893,22 @@ def detect_gpus():
     except:
         pass
     
-    # If no NVIDIA GPUs found, add placeholder
+    # If no NVIDIA GPUs found, try torch detection as fallback
+    if not gpus:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    name = torch.cuda.get_device_name(i)
+                    gpus.append({
+                        'id': i,
+                        'name': f"{name} (Torch Detected)",
+                        'type': 'nvidia'
+                    })
+        except:
+            pass
+
+    # If still no GPUs found, add placeholder
     if not gpus:
         gpus = [
             {'id': 0, 'name': 'GPU 0 (Default)', 'type': 'default'},

@@ -98,12 +98,23 @@ def main():
     # Load models
     upscale_model = None
     restoration_models = []
+    model_scale = None
 
     if SPANDREL_AVAILABLE:
         if args.upscale_model and os.path.exists(args.upscale_model):
             print(f"Loading upscale model: {args.upscale_model}")
             try:
-                upscale_model = ModelLoader().load_from_file(args.upscale_model).to(device).eval()
+                # Load model using spandrel
+                descriptor = ModelLoader().load_from_file(args.upscale_model)
+                upscale_model = descriptor.to(device).eval()
+
+                # Check for scale in descriptor
+                if hasattr(descriptor, 'scale'):
+                    model_scale = descriptor.scale
+                    print(f"Model architecture: {descriptor.architecture.name if hasattr(descriptor, 'architecture') else 'Unknown'}, Native scale: {model_scale}x")
+                elif hasattr(upscale_model, 'scale'):
+                    model_scale = upscale_model.scale
+                    print(f"Detected scale from model attribute: {model_scale}x")
             except Exception as e:
                 print(f"Error loading upscale model: {e}")
 
@@ -119,10 +130,9 @@ def main():
         print("Warning: spandrel not available. AI models will not be used. Falling back to resizing.")
 
     # Determine output resolution
-    # Try to get scale from model if possible
-    scale = args.override_upscale_scale or 2
-    if upscale_model and hasattr(upscale_model, 'scale'):
-        scale = upscale_model.scale
+    # Order of priority: 1. override_upscale_scale, 2. model_scale, 3. default 2
+    scale = args.override_upscale_scale or model_scale or 2
+    print(f"Final determined scale factor: {scale}x")
 
     output_w = info['width'] * scale
     output_h = info['height'] * scale
