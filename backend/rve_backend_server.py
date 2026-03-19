@@ -99,11 +99,16 @@ class RVEBackendHandler(BaseHTTPRequestHandler):
         # Listă jobs
         elif path == '/jobs':
             with job_lock:
-                # Return last 50 jobs
+                # Merge active jobs and history
                 jobs_to_return = []
+                # Add active jobs first
+                for jid, job in active_jobs.items():
+                    jobs_to_return.append(job.copy())
+                # Add history (last 50)
                 for job in job_history[-50:]:
-                    job_copy = job.copy()
-                    jobs_to_return.append(job_copy)
+                    # Don't add if already in active_jobs
+                    if not any(j['id'] == job['id'] for j in jobs_to_return):
+                        jobs_to_return.append(job.copy())
             self._send_response(jobs_to_return)
 
         # Models disponibile
@@ -309,6 +314,14 @@ class RVEBackendHandler(BaseHTTPRequestHandler):
 
             if settings.get('tta_enabled'):
                 cmd.append('--tta')
+
+            if settings.get('scene_detect_cuda'):
+                cmd.extend(['--scene_detect_method', 'cuda'])
+            elif settings.get('scene_detect_enabled'):
+                cmd.extend(['--scene_detect_method', 'cpu'])
+
+            if settings.get('deinterlace_method') and settings['deinterlace_method'] != 'none':
+                cmd.extend(['--deinterlace_method', settings['deinterlace_method']])
 
             print(f"\n🚀 Starting job {job_id}")
             print(f"   Command: {' '.join(cmd)}")

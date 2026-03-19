@@ -27,6 +27,27 @@ def get_video_info(input_path):
     cap.release()
     return info
 
+def detect_scene_change(frame1, frame2, threshold=30.0, device="cpu"):
+    """Detect scene change using GPU if requested"""
+    if frame1 is None or frame2 is None:
+        return False
+
+    if device == "cuda" and torch.cuda.is_available():
+        # Optimization: Use smaller resolution for scene detection
+        f1 = cv2.resize(frame1, (256, 256))
+        f2 = cv2.resize(frame2, (256, 256))
+        t1 = torch.from_numpy(f1).to("cuda").float()
+        t2 = torch.from_numpy(f2).to("cuda").float()
+        diff = torch.abs(t1 - t2).mean()
+        # Explicit print to confirm CUDA usage
+        print(f"CUDA Scene Detect Diff: {diff.item():.2f}")
+        return diff.item() > threshold
+    else:
+        # CPU Fallback (OpenCV)
+        diff = cv2.absdiff(frame1, frame2)
+        mean_diff = np.mean(diff)
+        return mean_diff > threshold
+
 def process_frame(model, frame, device, tilesize=0, overlap=16, precision="auto", tta=False):
     if model is None:
         return frame
@@ -118,6 +139,9 @@ def main():
     parser.add_argument("--overlap", type=int, default=16, help="Overlap between tiles")
     parser.add_argument("--precision", choices=["float16", "float32", "auto"], default="auto", help="Inference precision")
     parser.add_argument("--tta", action="store_true", help="Enable Test Time Augmentation")
+    parser.add_argument("--scene_detect_method", choices=["cpu", "cuda", "none"], default="none", help="Scene detection device")
+    parser.add_argument("--scene_detect_threshold", type=float, default=30.0, help="Scene detection threshold")
+    parser.add_argument("--deinterlace_method", default="none", help="Deinterlace method (currently placeholder)")
     parser.add_argument("--version", action="store_true", help="Print version")
     parser.add_argument("--list_backends", action="store_true", help="List backends")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output")
@@ -230,12 +254,19 @@ def main():
     process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
     cap = cv2.VideoCapture(args.input)
     frame_idx = 0
+    prev_frame = None
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
+
+            # Scene Detection
+            if args.scene_detect_method != "none":
+                if detect_scene_change(prev_frame, frame, args.scene_detect_threshold, args.scene_detect_method):
+                    print(f"Scene change detected at frame {frame_idx}")
+                prev_frame = frame.copy()
 
             # Apply restoration models (denoise, etc.) first
             for r_model in restoration_models:

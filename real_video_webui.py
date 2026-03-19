@@ -2855,6 +2855,10 @@ def create_html_template():
                             <input type="checkbox" id="ttaEnabled">
                             <label for="ttaEnabled" title="Test Time Augmentation - Improves quality but slower">Enable TTA (Test Time Augmentation)</label>
                         </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="sceneDetectCuda" checked>
+                            <label for="sceneDetectCuda">CUDA Scene Detection</label>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -4354,6 +4358,8 @@ def create_html_template():
                 tile_size: parseInt(document.getElementById('tileSize').value),
                 overlap: parseInt(document.getElementById('tileOverlap').value),
                 tta_enabled: document.getElementById('ttaEnabled').checked,
+                scene_detect_enabled: document.getElementById('sceneDetectCuda').checked,
+                scene_detect_cuda: document.getElementById('sceneDetectCuda').checked,
                 tiling_enabled: document.getElementById('tilingEnabled').checked || parseInt(document.getElementById('tileSize').value) > 0,
                 benchmark_mode: document.getElementById('benchmarkMode').checked,
                 ensemble_mode: document.getElementById('ensembleMode').checked,
@@ -5001,6 +5007,9 @@ def create_html_template():
             const savedTiling = localStorage.getItem('tilingEnabled') || 'false';
             document.getElementById('tilingEnabled').checked = savedTiling === 'true';
             
+            const savedSceneCuda = localStorage.getItem('sceneDetectCuda') || 'true';
+            document.getElementById('sceneDetectCuda').checked = savedSceneCuda === 'true';
+
             // Save settings on change
             document.getElementById('theme').addEventListener('change', function() {
                 localStorage.setItem('theme', this.value);
@@ -5026,6 +5035,10 @@ def create_html_template():
                 localStorage.setItem('tilingEnabled', this.checked);
             });
             
+            document.getElementById('sceneDetectCuda').addEventListener('change', function() {
+                localStorage.setItem('sceneDetectCuda', this.checked);
+            });
+
             // Generate unique IDs for deinterlace and MXF preview
             currentDeinterlaceJobId = 'deinterlace_' + Date.now();
             currentMxfPreviewJobId = 'mxf_preview_' + Date.now();
@@ -5060,13 +5073,14 @@ class ProcessingSettings:
     denoise_model: str = ""
     decompress_enabled: bool = False
     decompress_model: str = ""
-    scene_detect_enabled: bool = True
+    scene_detect_enabled: bool = False
     backend: str = "pytorch"
     gpu_id: int = 0
     precision: str = "auto"
     tile_size: int = 0
     overlap: int = 16
     tta_enabled: bool = False
+    scene_detect_cuda: bool = True
     output_format: str = "mp4"
     output_codec: str = "libx264"
     crf: int = 18
