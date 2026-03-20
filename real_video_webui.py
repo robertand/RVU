@@ -32,19 +32,21 @@ try:
     from flask_socketio import SocketIO, emit
     from werkzeug.utils import secure_filename
     import ffmpeg
+    import requests
 except ImportError:
     print("Installing required packages...")
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", 
                           "opencv-python", "numpy", "flask", "flask-socketio",
                           "python-socketio", "werkzeug", "ffmpeg-python",
-                          "psutil"])
+                          "psutil", "spandrel", "requests"])
     import cv2
     import numpy as np
     from flask import Flask, render_template, request, jsonify, send_file, Response
     from flask_socketio import SocketIO, emit
     from werkzeug.utils import secure_filename
     import ffmpeg
+    import requests
 # ============================================================================
 # CONFIGURATION AND CONSTANTS
 # ============================================================================
@@ -62,6 +64,8 @@ class Config:
     TEMPLATE_FOLDER = os.path.join(BASE_DIR, "templates")
     RVE_BACKEND_PATH = os.path.join(BASE_DIR, "backend")
     RVE_PYTHON_PATH = os.path.join(BASE_DIR, "python", "python", "bin", "python3")
+    if not os.path.exists(RVE_PYTHON_PATH):
+        RVE_PYTHON_PATH = sys.executable
     # Added MXF format and increased max upload size for 100GB files
     ALLOWED_EXTENSIONS = {'mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'mxf', 'mts', 'm2ts', 'ts', 'mpg', 'mpeg'}
     HOST = "0.0.0.0"
@@ -83,6 +87,10 @@ class Config:
     # Hardware acceleration
     HW_ACCEL_AVAILABLE = False
     HW_ACCEL_TYPE = None  # 'cuda', 'qsv', 'vaapi', 'videotoolbox'
+    # Default processing settings
+    DEFAULT_TILE_SIZE = 0
+    DEFAULT_OVERLAP = 16
+    DEFAULT_PRECISION = 'auto'
 
 config = Config()
 
@@ -151,7 +159,7 @@ socketio = SocketIO(
 
 # Create necessary directories
 for folder in [config.UPLOAD_FOLDER, config.OUTPUT_FOLDER, config.TEMP_FOLDER, 
-               config.TEMPLATE_FOLDER, config.CUSTOM_MODELS_PATH, config.TEMP_DOWNLOAD_PATH]:
+               config.TEMPLATE_FOLDER, config.MODELS_FOLDER, config.CUSTOM_MODELS_PATH, config.TEMP_DOWNLOAD_PATH]:
     Path(folder).mkdir(exist_ok=True)
 
 print(f"Base directory: {config.BASE_DIR}")
@@ -852,7 +860,7 @@ class Deinterlacer:
 # VERIFICARE BACKEND ȘI GPU-URI
 # ============================================================================
 
-RVE_BACKEND_FILE = os.path.join(config.RVE_BACKEND_PATH, "rve-backend.py")
+RVE_BACKEND_FILE = os.path.join(config.RVE_BACKEND_PATH, "rve_backend_server.py")
 RVE_BACKEND_AVAILABLE = os.path.exists(RVE_BACKEND_FILE)
 
 # Detect available GPUs
@@ -891,7 +899,22 @@ def detect_gpus():
     except:
         pass
     
-    # If no NVIDIA GPUs found, add placeholder
+    # If no NVIDIA GPUs found, try torch detection as fallback
+    if not gpus:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    name = torch.cuda.get_device_name(i)
+                    gpus.append({
+                        'id': i,
+                        'name': f"{name} (Torch Detected)",
+                        'type': 'nvidia'
+                    })
+        except:
+            pass
+
+    # If still no GPUs found, add placeholder
     if not gpus:
         gpus = [
             {'id': 0, 'name': 'GPU 0 (Default)', 'type': 'default'},
@@ -2796,6 +2819,14 @@ def create_html_template():
                             </select>
                         </div>
                         <div style="min-width: 150px;">
+                            <label>Tile Size (0=Auto):</label>
+                            <input type="number" id="tileSize" value="0" min="0" step="32" style="width: 100%; padding: 8px; background: #334155; border: 1px solid #475569; border-radius: 6px; color: #f8fafc;">
+                        </div>
+                        <div style="min-width: 150px;">
+                            <label>Tile Overlap:</label>
+                            <input type="number" id="tileOverlap" value="16" min="0" step="8" style="width: 100%; padding: 8px; background: #334155; border: 1px solid #475569; border-radius: 6px; color: #f8fafc;">
+                        </div>
+                        <div style="min-width: 150px;">
                             <label>Output Format:</label>
                             <select id="outputFormat">
                                 <option value="mp4" selected>MP4</option>
@@ -2819,6 +2850,14 @@ def create_html_template():
                         <div class="checkbox-group">
                             <input type="checkbox" id="ensembleMode">
                             <label for="ensembleMode">Ensemble Mode (Better Quality)</label>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="ttaEnabled">
+                            <label for="ttaEnabled" title="Test Time Augmentation - Improves quality but slower">Enable TTA (Test Time Augmentation)</label>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="sceneDetectCuda" checked>
+                            <label for="sceneDetectCuda">CUDA Scene Detection</label>
                         </div>
                     </div>
                 </div>
@@ -4316,7 +4355,12 @@ def create_html_template():
                 precision: document.getElementById('precision').value,
                 output_format: document.getElementById('outputFormat').value,
                 crf: parseInt(document.getElementById('crf').value),
-                tiling_enabled: document.getElementById('tilingEnabled').checked,
+                tile_size: parseInt(document.getElementById('tileSize').value),
+                overlap: parseInt(document.getElementById('tileOverlap').value),
+                tta_enabled: document.getElementById('ttaEnabled').checked,
+                scene_detect_enabled: document.getElementById('sceneDetectCuda').checked,
+                scene_detect_cuda: document.getElementById('sceneDetectCuda').checked,
+                tiling_enabled: document.getElementById('tilingEnabled').checked || parseInt(document.getElementById('tileSize').value) > 0,
                 benchmark_mode: document.getElementById('benchmarkMode').checked,
                 ensemble_mode: document.getElementById('ensembleMode').checked,
                 auto_hdr_mode: document.getElementById('autoHDRMode').checked,
@@ -4814,7 +4858,7 @@ def create_html_template():
                 const clipPath = this.originalVideoContainer.style.clipPath;
                 if (!clipPath) return 50;
                 
-                const match = clipPath.match(/inset\(0\s+(\d+)%\s+0\s+0\)/);
+                const match = clipPath.match(/inset\\(0\\s+(\\d+)%\\s+0\\s+0\\)/);
                 return match ? parseFloat(match[1]) : 50;
             }
             
@@ -4963,6 +5007,9 @@ def create_html_template():
             const savedTiling = localStorage.getItem('tilingEnabled') || 'false';
             document.getElementById('tilingEnabled').checked = savedTiling === 'true';
             
+            const savedSceneCuda = localStorage.getItem('sceneDetectCuda') || 'true';
+            document.getElementById('sceneDetectCuda').checked = savedSceneCuda === 'true';
+
             // Save settings on change
             document.getElementById('theme').addEventListener('change', function() {
                 localStorage.setItem('theme', this.value);
@@ -4988,6 +5035,10 @@ def create_html_template():
                 localStorage.setItem('tilingEnabled', this.checked);
             });
             
+            document.getElementById('sceneDetectCuda').addEventListener('change', function() {
+                localStorage.setItem('sceneDetectCuda', this.checked);
+            });
+
             // Generate unique IDs for deinterlace and MXF preview
             currentDeinterlaceJobId = 'deinterlace_' + Date.now();
             currentMxfPreviewJobId = 'mxf_preview_' + Date.now();
@@ -5022,11 +5073,14 @@ class ProcessingSettings:
     denoise_model: str = ""
     decompress_enabled: bool = False
     decompress_model: str = ""
-    scene_detect_enabled: bool = True
+    scene_detect_enabled: bool = False
     backend: str = "pytorch"
     gpu_id: int = 0
     precision: str = "auto"
     tile_size: int = 0
+    overlap: int = 16
+    tta_enabled: bool = False
+    scene_detect_cuda: bool = True
     output_format: str = "mp4"
     output_codec: str = "libx264"
     crf: int = 18
@@ -5112,16 +5166,33 @@ class ModelManager:
         }
     
     def get_available_models(self, category: str = None, backend: str = None) -> dict:
-        """Get available models organized by subfolders"""
+        """Get available models organized by subfolders and custom models path, merging with API results if available"""
         all_models = {}
         
-        models_dir = Path(config.MODELS_FOLDER)
+        scan_dirs = [Path(config.MODELS_FOLDER), Path(config.CUSTOM_MODELS_PATH)]
         
         for cat in self.categories.keys():
             if category and cat != category:
                 continue
+
+            cat_models = {}
+            for models_dir in scan_dirs:
+                if models_dir.exists():
+                    cat_models.update(self._scan_models_for_backend(cat, backend, models_dir))
+
+            # Merge with API models if possible
+            try:
+                response = requests.get("http://localhost:8765/models", timeout=1)
+                if response.status_code == 200:
+                    api_models = response.json()
+                    if cat in api_models:
+                        for model_name, model_info in api_models[cat].items():
+                            if model_name not in cat_models:
+                                cat_models[model_name] = model_info
+            except:
+                pass
                 
-            all_models[cat] = self._scan_models_for_backend(cat, backend, models_dir)
+            all_models[cat] = cat_models
         
         return all_models if not category else {category: all_models.get(category, {})}
     
@@ -5199,9 +5270,9 @@ class ModelManager:
             return 'interpolate'
         elif 'drunet' in filename_lower or 'dncnn' in filename_lower or 'scunet' in filename_lower or 'denoise' in filename_lower:
             return 'denoise'
-        elif 'deh264' in filename_lower or 'decompress' in filename_lower or ('span' in filename_lower and 'deh264' in filename_lower):
+        elif 'deh264' in filename_lower or 'decompress' in filename_lower or (('span' in filename_lower or 'bhi' in filename_lower) and 'deh264' in filename_lower):
             return 'decompress'
-        elif 'nomos' in filename_lower or 'realesr' in filename_lower or 'upscale' in filename_lower or 'anime' in filename_lower or '2x' in filename_lower or '4x' in filename_lower or 'span' in filename_lower or 'conservative' in filename_lower:
+        elif any(k in filename_lower for k in ['nomos', 'realesr', 'upscale', 'anime', '2x', '4x', 'span', 'bhi', 'light', 'vsr', 'rtx', 'nvidia', 'ultrasharp', 'cugan', 'hat', 'swinir', 'conservative']):
             return 'upscale'
         
         return 'upscale'
@@ -5210,19 +5281,14 @@ class ModelManager:
         """Detect scale factor from model filename"""
         name_lower = model_name.lower()
         
-        if 'x4' in name_lower or '4x' in name_lower or 'x4plus' in name_lower:
-            return 4
-        elif 'x3' in name_lower or '3x' in name_lower:
-            return 3
-        elif 'x2' in name_lower or '2x' in name_lower:
-            return 2
-        elif 'x1' in name_lower or '1x' in name_lower:
-            return 1
-        elif 'nomos8k' in name_lower:
-            return 4
-        elif 'up2x' in name_lower:
-            return 2
-        elif 'realesr-general-x4v3' in name_lower:
+        # Try regex for x2, 2x, etc.
+        scale_match = re.search(r'(\d+)x|x(\d+)', name_lower)
+        if scale_match:
+            scale = int(scale_match.group(1) or scale_match.group(2))
+            if 1 <= scale <= 8:
+                return scale
+
+        if any(k in name_lower for k in ['nomos8k', 'realesr-general-x4v3', 'vsr']):
             return 4
         elif 'realesr-animevideov3-x2' in name_lower:
             return 2
@@ -5243,12 +5309,28 @@ DOWNLOADABLE_MODELS = [
         'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
     },
     {
+        'id': 'realesrgan-x4plus-anime',
+        'name': 'RealESRGAN x4plus Anime',
+        'description': 'Optimized for anime and drawings',
+        'size': '17MB',
+        'category': 'upscale',
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth'
+    },
+    {
         'id': 'realesr-animevideov3',
         'name': 'RealESR AnimeVideo v3',
-        'description': 'Anime video upscaler',
-        'size': '67MB',
+        'description': 'Anime video upscaler (fast)',
+        'size': '5MB',
         'category': 'upscale',
         'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth'
+    },
+    {
+        'id': 'realesr-general-x4v3',
+        'name': 'RealESR General x4v3',
+        'description': 'Latest general purpose model',
+        'size': '4MB',
+        'category': 'upscale',
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth'
     },
     {
         'id': 'rife-v4.6',
@@ -5259,6 +5341,14 @@ DOWNLOADABLE_MODELS = [
         'url': 'https://github.com/hzwer/Practical-RIFE/releases/download/v1.0/rife-v4.6.pth'
     },
     {
+        'id': 'rife-v4.15',
+        'name': 'RIFE v4.15',
+        'description': 'Latest RIFE model (higher quality)',
+        'size': '22MB',
+        'category': 'interpolate',
+        'url': 'https://github.com/hzwer/Practical-RIFE/releases/download/v1.0/rife-v4.15.pth'
+    },
+    {
         'id': 'drunet',
         'name': 'DRUNet',
         'description': 'Denoising model',
@@ -5267,12 +5357,36 @@ DOWNLOADABLE_MODELS = [
         'url': 'https://github.com/cszn/KAIR/releases/download/v1.0/drunet.pth'
     },
     {
+        'id': 'scunet',
+        'name': 'SCUNet',
+        'description': 'Blind image denoising',
+        'size': '28MB',
+        'category': 'denoise',
+        'url': 'https://github.com/cszn/KAIR/releases/download/v1.0/scunet.pth'
+    },
+    {
         'id': 'deh264',
         'name': 'DeH264',
         'description': 'H.264 compression artifact removal',
         'size': '42MB',
         'category': 'decompress',
         'url': 'https://github.com/cszn/KAIR/releases/download/v1.0/deh264.pth'
+    },
+    {
+        'id': '4x-ultrasharp',
+        'name': '4x UltraSharp',
+        'description': 'Highly popular general purpose upscaler',
+        'size': '64MB',
+        'category': 'upscale',
+        'url': 'https://huggingface.co/lokCX/4x-Ultrasharp/resolve/main/4x-UltraSharp.pth?download=true'
+    },
+    {
+        'id': '2x-real-cugan',
+        'name': '2x Real-CUGAN',
+        'description': 'Optimized for anime and general content',
+        'size': '5MB',
+        'category': 'upscale',
+        'url': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth'
     }
 ]
 
@@ -5378,9 +5492,9 @@ class VideoProcessor:
         
         settings = ProcessingSettings.from_dict(settings_dict)
         
-        if not self.rve_backend.backend_available:
+        if not self.rve_backend.detect_backend().get('available'):
             use_real_backend = False
-            print("Backend not available, forcing demo mode")
+            print("Backend API not available, forcing demo mode")
         
         display_name = f"{original_filename} (GPU {settings.gpu_id}, {settings.backend})"
         if settings.deinterlace_method != 'none':
@@ -5395,6 +5509,8 @@ class VideoProcessor:
             use_real_backend=use_real_backend
         )
         
+        print(f"DIAGNOSTIC: Created job with input resolution {VideoInfo.from_file(input_path).width}x{VideoInfo.from_file(input_path).height} on GPU {settings.gpu_id}")
+
         self.active_jobs[job_id] = job
         self.job_queue.put(job)
         
@@ -5522,35 +5638,65 @@ class VideoProcessor:
             return False, job.input_path
     
     def _process_with_rve_backend(self, job: ProcessingJob, input_path: str):
-        """Process job using real RVE backend with hardware acceleration"""
+        """Process job using RVE backend API"""
         try:
-            print(f"Starting RVE backend for job {job.id} on GPU {job.settings.gpu_id}")
-            print(f"Input path: {input_path}")
-            print(f"Deinterlace method: {job.settings.deinterlace_method}")
-            print(f"Hardware acceleration: {config.HW_ACCEL_AVAILABLE} ({config.HW_ACCEL_TYPE})")
+            print(f"Starting job {job.id} via API on GPU {job.settings.gpu_id}")
             
             # Update job to use deinterlaced input if available
             job.input_path = input_path
+            filename = os.path.basename(input_path)
             
-            # Create arguments and start process
-            args = self.rve_backend.create_backend_arguments(job)
-            print("Final command arguments:")
-            print(" ".join(args))
+            # Request processing via API
+            payload = {
+                'filename': filename,
+                'settings': asdict(job.settings)
+            }
             
-            process = self.rve_backend.start_backend_process(job)
-            job.process = process  # Store process reference for stopping
-            
-            # Monitor progress
-            progress_thread = threading.Thread(
-                target=self._monitor_progress,
-                args=(job, process),
-                daemon=True
+            response = requests.post(
+                f"{self.rve_backend.api_url}/process",
+                json=payload,
+                timeout=10
             )
-            progress_thread.start()
             
-            # Wait for process to complete
-            print(f"Waiting for process {process.pid} to complete...")
-            return_code = process.wait()
+            if response.status_code != 200:
+                raise Exception(f"API Error: {response.text}")
+
+            api_data = response.json()
+            api_job_id = api_data.get('job_id')
+
+            # Monitor progress via API
+            while True:
+                time.sleep(2)
+
+                # Check if job was stopped locally
+                if job.status == 'cancelled':
+                    requests.post(f"{self.rve_backend.api_url}/stop_processing/{api_job_id}")
+                    break
+
+                # Get status from API
+                status_response = requests.get(f"{self.rve_backend.api_url}/jobs")
+                if status_response.status_code == 200:
+                    api_jobs = status_response.json()
+                    remote_job = next((j for j in api_jobs if j['id'] == api_job_id), None)
+
+                    if remote_job:
+                        job.progress = remote_job.get('progress', 0)
+                        job.status = remote_job.get('status', 'processing')
+                        self._emit_job_update(job)
+
+                        if job.status in ['completed', 'failed']:
+                            if job.status == 'completed':
+                                # Map remote output to local path
+                                remote_output = remote_job.get('output')
+                                if remote_output:
+                                    job.output_path = os.path.join(config.OUTPUT_FOLDER, remote_output)
+                            else:
+                                job.error_message = remote_job.get('error', 'Unknown remote error')
+                            break
+                else:
+                    print(f"Warning: Could not get API job status: {status_response.status_code}")
+
+            return_code = 0 if job.status == 'completed' else 1
             
             print(f"Process completed with return code: {return_code}")
             
@@ -5934,8 +6080,22 @@ class ModelDownloader:
             dest_dir = os.path.join(config.MODELS_FOLDER, model['category'])
             os.makedirs(dest_dir, exist_ok=True)
             
-            dest_path = os.path.join(dest_dir, os.path.basename(model['url']))
-            shutil.move(temp_path, dest_path)
+            # Extract filename from URL, removing query parameters
+            url_path = model['url'].split('?')[0]
+            filename = os.path.basename(url_path)
+
+            # Ensure filename has correct extension if not present in URL
+            if '.' not in filename:
+                filename = f"{model['id']}.pth"
+
+            dest_path = os.path.abspath(os.path.join(dest_dir, filename))
+            print(f"Moving downloaded model {model['id']} from {temp_path} to: {dest_path}")
+
+            if os.path.exists(temp_path):
+                shutil.move(temp_path, dest_path)
+                print(f"Successfully saved model to: {dest_path}")
+            else:
+                raise Exception(f"Temporary file {temp_path} not found after download")
             
             socketio.emit('download_complete', {
                 'model_id': model['id'],
@@ -5944,7 +6104,9 @@ class ModelDownloader:
             })
             
         except Exception as e:
-            print(f"Error downloading model {model['id']}: {e}")
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"Error downloading model {model['id']}:\n{error_details}")
             socketio.emit('download_error', {
                 'model_id': model['id'],
                 'error': str(e)
@@ -5971,585 +6133,62 @@ class ModelDownloader:
                 return f"{size:.1f}{unit}"
             size /= 1024.0
         return f"{size:.1f}TB"
-    
-    def create_job(self, input_path: str, settings_dict: dict, use_real_backend: bool = True) -> ProcessingJob:
-        """Create a new processing job with unique output filename"""
-        job_id = f"job_{int(time.time() * 1000)}"
-        original_filename = os.path.splitext(os.path.basename(input_path))[0]
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_output_name = f"{original_filename}_enhanced_{timestamp}"
-        
-        output_format = settings_dict.get('output_format', 'mp4')
-        output_filename = f"{base_output_name}.{output_format}"
-        output_path = os.path.join(config.OUTPUT_FOLDER, output_filename)
-        
-        counter = 1
-        while os.path.exists(output_path):
-            output_filename = f"{base_output_name}_{counter:03d}.{output_format}"
-            output_path = os.path.join(config.OUTPUT_FOLDER, output_filename)
-            counter += 1
-        
-        settings = ProcessingSettings.from_dict(settings_dict)
-        
-        if not self.rve_backend.backend_available:
-            use_real_backend = False
-            print("Backend not available, forcing demo mode")
-        
-        display_name = f"{original_filename} (GPU {settings.gpu_id}, {settings.backend})"
-        if settings.deinterlace_method != 'none':
-            display_name += f" + Deinterlace:{settings.deinterlace_method}"
-        
-        job = ProcessingJob(
-            id=job_id,
-            input_path=input_path,
-            output_path=output_path,
-            display_name=display_name,
-            settings=settings,
-            use_real_backend=use_real_backend
-        )
-        
-        self.active_jobs[job_id] = job
-        self.job_queue.put(job)
-        
-        print(f"Created job {job_id}")
-        print(f"  Input: {original_filename}")
-        print(f"  Output: {output_filename}")
-        print(f"  GPU: {settings.gpu_id}")
-        print(f"  Backend: {settings.backend}")
-        print(f"  Deinterlace: {settings.deinterlace_method}")
-        print(f"  Hardware Acceleration: {config.HW_ACCEL_AVAILABLE} ({config.HW_ACCEL_TYPE})")
-        print(f"  Real backend: {use_real_backend}")
-        
-        return job
-    
-    def _process_queue(self):
-        """Process jobs from the queue"""
-        while True:
-            try:
-                job = self.job_queue.get(timeout=1)
-                with self.processing_lock:
-                    self.current_processing_job_id = job.id
-                self._process_job(job)
-                with self.processing_lock:
-                    self.current_processing_job_id = None
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Error in processing queue: {e}")
-                time.sleep(1)
-    
-    def _process_job(self, job: ProcessingJob):
-        """Process a single job with hardware accelerated deinterlacing"""
-        try:
-            job.status = "processing"
-            job.start_time = datetime.now()
-            self._emit_job_update(job)
-            
-            print(f"Processing job {job.id} on GPU {job.settings.gpu_id}")
-            print(f"Deinterlace method: {job.settings.deinterlace_method}")
-            print(f"Hardware acceleration: {config.HW_ACCEL_AVAILABLE} ({config.HW_ACCEL_TYPE})")
-            
-            # Check if video is large
-            file_size_gb = os.path.getsize(job.input_path) / (1024**3)
-            if file_size_gb > 5:
-                print(f"Large file detected: {file_size_gb:.2f} GB")
-                print("Using hardware accelerated processing for optimal performance")
-            
-            # Step 1: Deinterlace if needed (with hardware acceleration)
-            actual_input_path = job.input_path
-            if job.settings.deinterlace_method != 'none':
-                print(f"Deinterlacing video with hardware accelerated method: {job.settings.deinterlace_method}")
-                success, deinterlaced_path = self._deinterlace_video_fast(job)
-                if success:
-                    actual_input_path = deinterlaced_path
-                    job.deinterlaced_path = deinterlaced_path
-                    print(f"Hardware accelerated deinterlacing completed, using: {actual_input_path}")
-                else:
-                    print("Deinterlacing failed, using original video")
-                    # Continue with original video
-            
-            if job.use_real_backend:
-                self._process_with_rve_backend(job, actual_input_path)
-            else:
-                self._process_simulated(job, actual_input_path)
-            
-        except Exception as e:
-            job.status = "failed"
-            job.error_message = str(e)
-            print(f"Job {job.id} failed: {e}")
-            self._emit_job_update(job)
-    
-    def _deinterlace_video_fast(self, job: ProcessingJob) -> Tuple[bool, str]:
-        """Deinterlace video using hardware acceleration with progress tracking"""
-        try:
-            # Create temp file for deinterlaced video
-            temp_dir = os.path.join(config.TEMP_FOLDER, "deinterlaced")
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            temp_filename = f"{job.id}_deinterlaced.mp4"
-            temp_path = os.path.join(temp_dir, temp_filename)
-            
-            print(f"Hardware accelerated deinterlacing {job.input_path} to {temp_path}")
-            
-            # Update job status
-            job.status = "deinterlacing"
-            job.progress = 10.0
-            self._emit_job_update(job)
-            
-            # Use hardware accelerated deinterlacing
-            success, message = self.deinterlacer.deinterlace_video_fast(
-                input_path=job.input_path,
-                output_path=temp_path,
-                method=job.settings.deinterlace_method,
-                job_id=job.id,
-                socketio=self.socketio
-            )
-            
-            if success:
-                print(f"Hardware accelerated deinterlacing successful: {message}")
-                job.progress = 30.0
-                self._emit_job_update(job)
-                return True, temp_path
-            else:
-                print(f"Hardware accelerated deinterlacing failed: {message}")
-                # Fallback to original method
-                print("Trying fallback deinterlacing method...")
-                success2, message2 = self.deinterlacer.deinterlace_video(
-                    input_path=job.input_path,
-                    output_path=temp_path,
-                    method=job.settings.deinterlace_method,
-                    quality='high'
-                )
-                
-                if success2:
-                    job.progress = 30.0
-                    self._emit_job_update(job)
-                    return True, temp_path
-                else:
-                    job.error_message = f"Deinterlacing failed: {message2}"
-                    return False, job.input_path
-                
-        except Exception as e:
-            print(f"Error in hardware accelerated deinterlacing: {e}")
-            job.error_message = f"Deinterlacing error: {str(e)}"
-            return False, job.input_path
-    
-    def _process_with_rve_backend(self, job: ProcessingJob, input_path: str):
-        """Process job using real RVE backend with hardware acceleration"""
-        try:
-            print(f"Starting RVE backend for job {job.id} on GPU {job.settings.gpu_id}")
-            print(f"Input path: {input_path}")
-            print(f"Deinterlace method: {job.settings.deinterlace_method}")
-            print(f"Hardware acceleration: {config.HW_ACCEL_AVAILABLE} ({config.HW_ACCEL_TYPE})")
-            
-            # Update job to use deinterlaced input if available
-            job.input_path = input_path
-            
-            # Create arguments and start process
-            args = self.rve_backend.create_backend_arguments(job)
-            print("Final command arguments:")
-            print(" ".join(args))
-            
-            process = self.rve_backend.start_backend_process(job)
-            job.process = process  # Store process reference for stopping
-            
-            # Monitor progress
-            progress_thread = threading.Thread(
-                target=self._monitor_progress,
-                args=(job, process),
-                daemon=True
-            )
-            progress_thread.start()
-            
-            # Wait for process to complete
-            print(f"Waiting for process {process.pid} to complete...")
-            return_code = process.wait()
-            
-            print(f"Process completed with return code: {return_code}")
-            
-            # Check if job was stopped
-            if job.status == 'cancelled':
-                print(f"Job {job.id} was stopped by user")
-                job.end_time = datetime.now()
-                self._emit_job_update(job)
-                
-                # Clean up deinterlaced temp file if it exists
-                if job.deinterlaced_path and os.path.exists(job.deinterlaced_path):
-                    try:
-                        os.remove(job.deinterlaced_path)
-                        print(f"Cleaned up deinterlaced temp file: {job.deinterlaced_path}")
-                    except:
-                        pass
-                return
-            
-            # Check output
-            output_exists = os.path.exists(job.output_path)
-            print(f"Output file exists: {output_exists}")
-            print(f"Output path: {job.output_path}")
-            
-            if output_exists:
-                file_size = os.path.getsize(job.output_path)
-                print(f"Output file size: {file_size} bytes")
-            
-            # Read log for debugging
-            if job.log_file and os.path.exists(job.log_file):
-                with open(job.log_file, 'r') as f:
-                    log_content = f.read()
-                    print(f"Log file (last 500 chars):")
-                    print(log_content[-500:] if len(log_content) > 500 else log_content)
-            
-            if return_code == 0 and output_exists:
-                job.status = "completed"
-                job.progress = 100.0
-                print(f"Job {job.id} completed successfully on GPU {job.settings.gpu_id}")
-                
-                # Create preview
-                self._create_video_preview(job)
-            else:
-                job.status = "failed"
-                error_msg = f"Backend failed with exit code {return_code}"
-                if not output_exists:
-                    error_msg += " and output file was not created"
-                job.error_message = error_msg
-                
-                if job.log_file and os.path.exists(job.log_file):
-                    try:
-                        with open(job.log_file, 'r') as f:
-                            lines = f.readlines()
-                            last_lines = lines[-20:] if len(lines) > 20 else lines
-                            error_details = "".join(last_lines)
-                            job.error_message += f"\nLast log lines:\n{error_details}"
-                    except:
-                        pass
-                
-                print(f"Job {job.id} failed on GPU {job.settings.gpu_id}: {job.error_message}")
-            
-            job.end_time = datetime.now()
-            self._emit_job_update(job)
-            
-            # Clean up deinterlaced temp file if it exists
-            if job.deinterlaced_path and os.path.exists(job.deinterlaced_path):
-                try:
-                    os.remove(job.deinterlaced_path)
-                    print(f"Cleaned up deinterlaced temp file: {job.deinterlaced_path}")
-                except:
-                    pass
-            
-            print(f"Job {job.id} final status: {job.status}")
-            print(f"Job {job.id} output path: {job.output_path}")
-            
-        except Exception as e:
-            job.status = "failed"
-            job.error_message = f"Error in RVE backend: {str(e)}"
-            job.end_time = datetime.now()
-            print(f"Exception in RVE backend for job {job.id}: {e}")
-            self._emit_job_update(job)
-            
-            # Clean up deinterlaced temp file
-            if job.deinterlaced_path and os.path.exists(job.deinterlaced_path):
-                try:
-                    os.remove(job.deinterlaced_path)
-                except:
-                    pass
-
-    def _monitor_progress(self, job: ProcessingJob, process):
-        """Monitor progress by reading log file"""
-        last_position = 0
-        total_frames = 0
-        
-        try:
-            cap = cv2.VideoCapture(job.input_path)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-            print(f"Total frames to process: {total_frames}")
-        except:
-            total_frames = 0
-        
-        while process.poll() is None:
-            # Check if job was cancelled
-            if job.status == 'cancelled':
-                print(f"Job {job.id} cancelled, stopping progress monitoring")
-                break
-                
-            if job.log_file and os.path.exists(job.log_file):
-                try:
-                    with open(job.log_file, 'r') as f:
-                        f.seek(last_position)
-                        new_content = f.read()
-                        last_position = f.tell()
-                        
-                        if new_content:
-                            lines = new_content.split('\n')
-                            for line in lines:
-                                if 'Current Frame:' in line:
-                                    frame_match = re.search(r'Current Frame:\s*(\d+)', line)
-                                    if frame_match and total_frames > 0:
-                                        current_frame = int(frame_match.group(1))
-                                        progress = min(99.0, (current_frame / total_frames) * 100)
-                                        if progress > job.progress:
-                                            job.progress = progress
-                                            self._emit_job_update(job)
-                                            print(f"Progress update: {progress:.1f}% (frame {current_frame}/{total_frames})")
-                
-                except Exception as e:
-                    print(f"Error reading progress log: {e}")
-            
-            time.sleep(1)
-        
-        if job.status != 'cancelled':
-            job.progress = 99.9
-            self._emit_job_update(job)
-        
-    def _create_video_preview(self, job: ProcessingJob):
-        """Create a preview frame from processed video"""
-        try:
-            if not job.output_path or not os.path.exists(job.output_path):
-                return
-            
-            preview_dir = os.path.join(config.TEMP_FOLDER, "previews")
-            os.makedirs(preview_dir, exist_ok=True)
-            
-            preview_path = os.path.join(preview_dir, f"{job.id}_preview.jpg")
-            
-            cap = cv2.VideoCapture(job.output_path)
-            if cap.isOpened():
-                ret, frame = cap.read()
-                if ret:
-                    max_size = (640, 360)
-                    height, width = frame.shape[:2]
-                    if width > max_size[0] or height > max_size[1]:
-                        scale = min(max_size[0] / width, max_size[1] / height)
-                        new_width = int(width * scale)
-                        new_height = int(height * scale)
-                        frame = cv2.resize(frame, (new_width, new_height))
-                    
-                    cv2.imwrite(preview_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    print(f"Created preview: {preview_path}")
-                    
-                    job.preview_path = preview_path
-                cap.release()
-        except Exception as e:
-            print(f"Error creating preview: {e}")
-    
-    def _process_simulated(self, job: ProcessingJob, input_path: str):
-        """Simulate processing for demo purposes"""
-        try:
-            print(f"Simulating processing for job {job.id} (GPU {job.settings.gpu_id})")
-            print(f"Deinterlace method: {job.settings.deinterlace_method}")
-            print(f"Hardware acceleration: {config.HW_ACCEL_AVAILABLE} ({config.HW_ACCEL_TYPE})")
-            
-            total_steps = 10
-            
-            for i in range(total_steps):
-                # Check if job was cancelled
-                if job.status == 'cancelled':
-                    print(f"Job {job.id} cancelled during simulation")
-                    job.end_time = datetime.now()
-                    self._emit_job_update(job)
-                    return
-                    
-                time.sleep(1)
-                job.progress = (i + 1) / total_steps * 100
-                
-                if i % 2 == 0:
-                    self._emit_job_update(job)
-                    print(f"  Progress: {job.progress:.1f}%")
-            
-            job.status = "completed"
-            job.progress = 100.0
-            job.end_time = datetime.now()
-            
-            # Create dummy output
-            if os.path.exists(input_path):
-                try:
-                    shutil.copy(input_path, job.output_path)
-                    print(f"Created demo output for job {job.id}")
-                except Exception as e:
-                    print(f"Error creating demo output: {e}")
-            
-            self._emit_job_update(job)
-            print(f"Job {job.id} completed (simulated)")
-            
-            # Clean up deinterlaced temp file
-            if job.deinterlaced_path and os.path.exists(job.deinterlaced_path):
-                try:
-                    os.remove(job.deinterlaced_path)
-                except:
-                    pass
-            
-        except Exception as e:
-            job.status = "failed"
-            job.error_message = str(e)
-            job.end_time = datetime.now()
-            print(f"Simulated job {job.id} failed: {e}")
-            self._emit_job_update(job)
-    
-    def _emit_job_update(self, job: ProcessingJob):
-        """Emit job update via SocketIO"""
-        try:
-            self.socketio.emit('job_update', job.to_dict())
-        except Exception as e:
-            print(f"Error emitting job update: {e}")
-    
-    def get_job(self, job_id: str) -> Optional[ProcessingJob]:
-        """Get job by ID"""
-        return self.active_jobs.get(job_id)
-    
-    def get_all_jobs(self) -> List[ProcessingJob]:
-        """Get all jobs sorted by start_time (newest first)"""
-        jobs = list(self.active_jobs.values())
-        jobs.sort(key=lambda x: x.start_time if x.start_time else datetime.min, reverse=True)
-        return jobs
-    
-    def cancel_job(self, job_id: str) -> bool:
-        """Cancel a job"""
-        if job_id in self.active_jobs:
-            job = self.active_jobs[job_id]
-            
-            # Update job status
-            job.status = "cancelled"
-            job.can_be_stopped = False
-            
-            # Try to kill the process if it exists
-            if job.process and job.process.poll() is None:
-                print(f"Attempting to stop process {job.process.pid} for job {job_id}")
-                try:
-                    # Try graceful termination first
-                    job.process.terminate()
-                    time.sleep(2)
-                    
-                    # Force kill if still running
-                    if job.process.poll() is None:
-                        job.process.kill()
-                        print(f"Force killed process {job.process.pid}")
-                    
-                    job.process.wait(timeout=5)
-                    print(f"Process {job.process.pid} stopped successfully")
-                except Exception as e:
-                    print(f"Error stopping process: {e}")
-            
-            # Also kill any child processes
-            try:
-                if job.process_pid:
-                    parent = psutil.Process(job.process_pid)
-                    for child in parent.children(recursive=True):
-                        try:
-                            child.terminate()
-                        except:
-                            pass
-                    parent.terminate()
-            except:
-                pass
-            
-            self._emit_job_update(job)
-            return True
-        return False
-    
-    def delete_job(self, job_id: str) -> bool:
-        """Delete a job"""
-        if job_id in self.active_jobs:
-            job = self.active_jobs[job_id]
-            
-            # Cancel job first if it's running
-            if job.status in ['processing', 'deinterlacing']:
-                self.cancel_job(job_id)
-            
-            try:
-                if os.path.exists(job.output_path):
-                    os.remove(job.output_path)
-                if job.log_file and os.path.exists(job.log_file):
-                    os.remove(job.log_file)
-                if job.preview_path and os.path.exists(job.preview_path):
-                    os.remove(job.preview_path)
-                if job.deinterlaced_path and os.path.exists(job.deinterlaced_path):
-                    os.remove(job.deinterlaced_path)
-            except:
-                pass
-            
-            del self.active_jobs[job_id]
-            return True
-        return False
-
-# ============================================================================
 # RVE BACKEND INTEGRATION (UPDATED CU ACCELERARE)
 # ============================================================================
 
 class RVEBackendIntegration:
-    """Integrates the REAL RVE backend with WebUI"""
+    """Integrates the REAL RVE backend with WebUI via HTTP API"""
     
     def __init__(self, socketio):
         self.socketio = socketio
-        self.backend_available = RVE_BACKEND_AVAILABLE
+        self.api_url = "http://localhost:8765"
         self.backend_info = {}
+        self._start_backend_server()
+
+    def _start_backend_server(self):
+        """Starts the backend server if not running"""
+        try:
+            requests.get(f"{self.api_url}/status", timeout=1)
+            print("✓ Backend server already running")
+        except:
+            print("🚀 Starting backend server...")
+            server_script = os.path.join(config.RVE_BACKEND_PATH, "rve_backend_server.py")
+            if os.path.exists(server_script):
+                subprocess.Popen([sys.executable, server_script],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+                # Wait for server to start
+                for _ in range(10):
+                    time.sleep(1)
+                    try:
+                        requests.get(f"{self.api_url}/status", timeout=1)
+                        print("✓ Backend server started successfully")
+                        return
+                    except:
+                        continue
+                print("⚠ Backend server taking too long to start...")
         
     def detect_backend(self):
-        """Detect available backends and capabilities"""
-        if not self.backend_available:
-            return {
-                'available': False,
-                'error': 'RVE backend not found'
-            }
-        
+        """Detect available backends and capabilities via API"""
         try:
-            env = os.environ.copy()
-            env['PYTHONPATH'] = f"{config.RVE_BACKEND_PATH}:{env.get('PYTHONPATH', '')}"
-            
-            result = subprocess.run(
-                [config.RVE_PYTHON_PATH, RVE_BACKEND_FILE, '--version'],
-                capture_output=True,
-                text=True,
-                cwd=config.RVE_BACKEND_PATH,
-                env=env,
-                timeout=3
-            )
-            
-            if result.returncode == 0:
-                version = result.stdout.strip()
-                
-                gpu_info = []
-                try:
-                    result2 = subprocess.run(
-                        [config.RVE_PYTHON_PATH, RVE_BACKEND_FILE, '--list_backends'],
-                        capture_output=True,
-                        text=True,
-                        cwd=config.RVE_BACKEND_PATH,
-                        env=env,
-                        timeout=5
-                    )
-                    
-                    if result2.returncode == 0:
-                        output = result2.stdout
-                        for line in output.split('\n'):
-                            if 'PyTorch GPU' in line or 'NCNN GPU' in line:
-                                gpu_info.append(line.strip())
-                except:
-                    pass
-                
+            response = requests.get(f"{self.api_url}/status", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
                 return {
                     'available': True,
                     'info': {
-                        'version': version,
-                        'backends': ['pytorch', 'ncnn', 'tensorrt'],
-                        'gpus': gpu_info if gpu_info else AVAILABLE_GPUS,
+                        'version': data.get('version', '2.0.0'),
+                        'backends': ['pytorch'],
+                        'gpus': data.get('gpus', AVAILABLE_GPUS),
                         'half_precision': True,
-                        'hardware_acceleration': config.HW_ACCEL_AVAILABLE,
-                        'hw_accel_type': config.HW_ACCEL_TYPE
+                        'hardware_acceleration': data.get('cuda', False),
+                        'hw_accel_type': 'cuda' if data.get('cuda') else None
                     }
                 }
             else:
-                print(f"Backend version check failed: {result.stderr}")
-                return {
-                    'available': False,
-                    'error': 'Backend test failed'
-                }
-                
+                return {'available': False, 'error': f'API Error: {response.status_code}'}
         except Exception as e:
-            print(f"Backend detection error: {str(e)}")
-            return {
-                'available': False,
-                'error': f'Backend error: {str(e)}'
-            }
+            return {'available': False, 'error': f'Connection error: {str(e)}'}
     
     def create_backend_arguments(self, job: ProcessingJob) -> list:
         """Create command line arguments for RVE backend with GPU support"""
@@ -6640,10 +6279,6 @@ class RVEBackendIntegration:
         settings = job.settings
         
         effective_gpu_id = gpu_id
-        if gpu_id > 0:
-            print(f"INFO: GPU ID {gpu_id} selected, but RVE backend might have GPU indexing issues")
-            print(f"Using GPU 0 for compatibility. Performance will still use CUDA_VISIBLE_DEVICES")
-            effective_gpu_id = 0
         
         if settings.upscale_enabled and settings.upscale_model:
             model_path = self._find_model_file_improved(
@@ -6746,6 +6381,16 @@ class RVEBackendIntegration:
         if settings.ensemble_mode:
             args.extend(['--ensemble'])
         
+        if settings.tta_enabled:
+            args.extend(['--tta'])
+
+        if settings.tile_size > 0:
+            args.extend(['--tilesize', str(settings.tile_size)])
+            args.extend(['--overlap', str(settings.overlap)])
+        elif settings.tiling_enabled:
+            args.extend(['--tilesize', '512'])
+            args.extend(['--overlap', '16'])
+
         if settings.auto_hdr_mode:
             args.extend(['--hdr_mode'])
         

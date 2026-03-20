@@ -1458,7 +1458,7 @@
                 <div class="sidebar-content">
                     <div id="load-video-tab" class="tab-content active">
                         <h2>Upload Video</h2>
-                        <div style="background: rgba(16, 185, 129, 0.1); border-left: 4px solid #10b981; padding: 8px; border-radius: 4px; margin-bottom: 15px; font-size: 12px;"><i class="fas fa-bolt"></i> <strong>Hardware Acceleration Active:</strong> CUDA</div>
+
                         <div class="upload-area" id="uploadArea">
                             <i class="fas fa-cloud-upload-alt"></i>
                             <h3>Drop video file here</h3>
@@ -1754,7 +1754,7 @@
                         <div class="form-group" style="min-width: 150px;">
                             <label>GPU:</label>
                             <select id="gpuSelection">
-                                <option value="0" selected>⚡ NVIDIA L40S (46068 MiB)</option><option value="1" >⚡ NVIDIA L40S (46068 MiB)</option><option value="2" >⚡ NVIDIA L40S (46068 MiB)</option><option value="3" >⚡ NVIDIA L40S (46068 MiB)</option>
+                                <option value="0" selected>🔧 GPU 0 (Default)</option><option value="1" >🔧 GPU 1</option><option value="2" >🔧 GPU 2</option><option value="3" >🔧 GPU 3</option>
                             </select>
                             <div class="gpu-info" id="gpuTensorrtInfo" style="display: none;">
                                 <i class="fas fa-info-circle"></i> TensorRT requires GPU 0
@@ -1771,7 +1771,7 @@
                         <div class="form-group" style="min-width: 150px;">
                             <label>Deinterlace:</label>
                             <select id="deinterlaceMethod">
-                                <option value="none" selected title="No deinterlacing">None</option><option value="yadif"  title="Yet Another DeInterlacing Filter">YADIF (CPU)</option><option value="bwdif"  title="Bob Weaver Deinterlacing Filter">BWDIF (CPU)</option><option value="w3fdif"  title="Weston 3 Field Deinterlacing Filter">W3FDIF (CPU)</option><option value="kerndeint"  title="Kernel Deinterlacing">Kerndeint (CPU)</option><option value="yadif_cuda"  title="Hardware accelerated YADIF (NVIDIA CUDA)">YADIF CUDA ⚡</option><option value="bwdif_cuda"  title="Hardware accelerated BWDIF (NVIDIA CUDA)">BWDIF CUDA ⚡</option>
+                                <option value="none" selected title="No deinterlacing">None</option><option value="yadif"  title="Yet Another DeInterlacing Filter">YADIF (CPU)</option><option value="bwdif"  title="Bob Weaver Deinterlacing Filter">BWDIF (CPU)</option><option value="w3fdif"  title="Weston 3 Field Deinterlacing Filter">W3FDIF (CPU)</option><option value="kerndeint"  title="Kernel Deinterlacing">Kerndeint (CPU)</option>
                             </select>
                         </div>
                     </div>
