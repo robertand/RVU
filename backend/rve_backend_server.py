@@ -11,9 +11,8 @@ import subprocess
 import threading
 import time
 import socket
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-import cgi
 import torch
 
 # Configurare
@@ -118,7 +117,7 @@ class RVEBackendHandler(BaseHTTPRequestHandler):
 
         # Verifică dacă e request pentru fișiere
         elif path.startswith('/uploads/'):
-            filename = path.replace('/uploads/', '')
+            filename = os.path.basename(path) # Sanitize path traversal
             filepath = os.path.join(UPLOAD_DIR, filename)
             if os.path.exists(filepath):
                 self._serve_file(filepath)
@@ -126,7 +125,7 @@ class RVEBackendHandler(BaseHTTPRequestHandler):
                 self._send_error('File not found', 404)
 
         elif path.startswith('/output/'):
-            filename = path.replace('/output/', '')
+            filename = os.path.basename(path) # Sanitize path traversal
             filepath = os.path.join(OUTPUT_DIR, filename)
             if os.path.exists(filepath):
                 self._serve_file(filepath)
@@ -137,18 +136,47 @@ class RVEBackendHandler(BaseHTTPRequestHandler):
             self._send_error('Not found', 404)
 
     def _serve_file(self, filepath):
-        """Servește un fișier"""
+        """Servește un fișier folosind streaming cu suport pentru Range requests"""
         try:
-            with open(filepath, 'rb') as f:
+            file_size = os.path.getsize(filepath)
+            range_header = self.headers.get('Range')
+
+            start = 0
+            end = file_size - 1
+
+            if range_header:
+                import re
+                match = re.search(r'bytes=(\d+)-(\d*)', range_header)
+                if match:
+                    start = int(match.group(1))
+                    if match.group(2):
+                        end = int(match.group(2))
+
+                self.send_response(206)
+                self.send_header('Content-Range', f'bytes {start}-{end}/{file_size}')
+            else:
                 self.send_response(200)
-                self.send_header('Content-Type', 'video/mp4')
-                self.send_header('Content-Length', str(os.path.getsize(filepath)))
-                self.send_header('Accept-Ranges', 'bytes')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(f.read())
+
+            content_length = end - start + 1
+            self.send_header('Content-Type', 'video/mp4')
+            self.send_header('Content-Length', str(content_length))
+            self.send_header('Accept-Ranges', 'bytes')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+
+            with open(filepath, 'rb') as f:
+                f.seek(start)
+                remaining = content_length
+                while remaining > 0:
+                    chunk_size = min(remaining, 1024 * 1024)
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
         except Exception as e:
-            self._send_error(f'Error serving file: {e}', 500)
+            # Nu putem trimite eroare dacă am început deja streaming-ul
+            print(f"Error streaming file {filepath}: {e}")
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -411,7 +439,7 @@ class RVEBackendHandler(BaseHTTPRequestHandler):
 
 def run_server():
     """Pornește serverul"""
-    server = HTTPServer((HOST, PORT), RVEBackendHandler)
+    server = ThreadingHTTPServer((HOST, PORT), RVEBackendHandler)
     print(f"\n{'='*50}")
     print(f"🚀 RVE Backend Server running on http://{HOST}:{PORT}")
     print(f"{'='*50}")

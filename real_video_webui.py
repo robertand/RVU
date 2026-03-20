@@ -6157,7 +6157,16 @@ class RVEBackendIntegration:
                 subprocess.Popen([sys.executable, server_script],
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
-                time.sleep(2)
+                # Wait for server to start
+                for _ in range(10):
+                    time.sleep(1)
+                    try:
+                        requests.get(f"{self.api_url}/status", timeout=1)
+                        print("✓ Backend server started successfully")
+                        return
+                    except:
+                        continue
+                print("⚠ Backend server taking too long to start...")
         
     def detect_backend(self):
         """Detect available backends and capabilities via API"""

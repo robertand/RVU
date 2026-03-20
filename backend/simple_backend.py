@@ -1,6 +1,18 @@
 import os
 import sys
 import argparse
+
+# Set GPU environment variable BEFORE importing torch
+if "--pytorch_gpu_id" in sys.argv:
+    try:
+        idx = sys.argv.index("--pytorch_gpu_id")
+        gpu_id = sys.argv[idx + 1]
+        if "CUDA_VISIBLE_DEVICES" not in os.environ:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+            print(f"Pre-set CUDA_VISIBLE_DEVICES={gpu_id}")
+    except:
+        pass
+
 import cv2
 import torch
 import numpy as np
@@ -60,10 +72,8 @@ def process_frame(model, frame, device, tilesize=0, overlap=16, precision="auto"
     # Set precision
     if precision == "float16" or (precision == "auto" and device.type == "cuda"):
         img = img.half()
-        model = model.half()
     else:
         img = img.float()
-        model = model.float()
 
     # Handle Tiling
     b, c, h, w = img.shape
@@ -189,6 +199,11 @@ def main():
                 descriptor = ModelLoader().load_from_file(args.upscale_model)
                 upscale_model = descriptor.to(device).eval()
 
+                # Set model precision once
+                if args.precision == "float16" or (args.precision == "auto" and device.type == "cuda"):
+                    upscale_model = upscale_model.half()
+                    print("Model precision set to FP16")
+
                 # Check for scale in descriptor
                 if hasattr(descriptor, 'scale'):
                     model_scale = descriptor.scale
@@ -197,14 +212,18 @@ def main():
                     model_scale = upscale_model.scale
                     print(f"Detected scale from model attribute: {model_scale}x")
             except Exception as e:
-                print(f"Error loading upscale model: {e}")
+                print(f"CRITICAL ERROR loading upscale model: {e}")
+                sys.exit(1) # Fail fast if model is missing or broken
 
         if args.extra_restoration_models:
             for m_path in args.extra_restoration_models:
                 if os.path.exists(m_path):
                     print(f"Loading restoration model: {m_path}")
                     try:
-                        restoration_models.append(ModelLoader().load_from_file(m_path).to(device).eval())
+                        r_model = ModelLoader().load_from_file(m_path).to(device).eval()
+                        if args.precision == "float16" or (args.precision == "auto" and device.type == "cuda"):
+                            r_model = r_model.half()
+                        restoration_models.append(r_model)
                     except Exception as e:
                         print(f"Error loading restoration model {m_path}: {e}")
     else:
